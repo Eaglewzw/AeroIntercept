@@ -1,11 +1,8 @@
 __pycache__/
 *.pyc
 *.egg-info/
-data/
-checkpoints/
-runs/
-results/*
-!results/gazebo_camera_30m.png
-export/
+# Reusable datasets and per-experiment outputs stay local.
+/artifacts/*
+!/artifacts/.gitkeep
 .pytest_cache/
 .idea/

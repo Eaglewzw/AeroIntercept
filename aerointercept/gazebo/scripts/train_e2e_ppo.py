@@ -39,7 +39,7 @@ def parse_args():
         help="Experiment C behavior-cloning checkpoint used only for weight initialization",
     )
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--logdir", default="runs/gazebo_e2e")
+    parser.add_argument("--logdir", default="artifacts/runs/gazebo_ppo")
     parser.add_argument("--mode", choices=(*MODES, "mixed"), default="mixed")
     parser.add_argument("--checkpoint-interval", type=int, default=256)
     parser.add_argument("--encoder-chunk-size", type=int, default=4)

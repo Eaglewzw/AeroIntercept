@@ -13,11 +13,11 @@
   target_pos : 目标 GPS→NED
 
 用法（仿真运行中）:
-  python -m aerointercept.evaluation.record_gazebo_episode --out data/gazebo_ep1.npz \\
+  python -m aerointercept.evaluation.record_gazebo_episode --out artifacts/data/gazebo_ep1.npz \\
       --duration 60
 
 校准示例:
-  d = np.load("data/gazebo_ep1.npz")
+  d = np.load("artifacts/data/gazebo_ep1.npz")
   # 用 cmd_vel 与 vel 的一阶拟合估计 tau_v，更新 configs/default.yaml
 """
 import argparse
@@ -117,7 +117,7 @@ class Recorder(Node):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out", default="data/gazebo_episode.npz")
+    parser.add_argument("--out", default="artifacts/data/gazebo_episode.npz")
     parser.add_argument("--duration", type=float, default=60.0)
     args = parser.parse_args()
 

@@ -67,7 +67,7 @@ def main():
     parser.add_argument("--episodes", type=int, default=None)
     parser.add_argument("--mode", default="mixed")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--out", default="data/e2e_bc")
+    parser.add_argument("--out", default="artifacts/data/e2e_bc")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 

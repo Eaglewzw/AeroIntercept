@@ -4,9 +4,9 @@
 
 用法:
   python -m aerointercept.evaluation.eval_gym --policy png
-  python -m aerointercept.evaluation.eval_gym --policy checkpoints/bc_policy.pt
-  python -m aerointercept.evaluation.eval_gym --policy checkpoints/rl_policy.pt \\
-      --episodes 200 --out results/rl_eval.csv --save-traj 5
+  python -m aerointercept.evaluation.eval_gym --policy artifacts/runs/legacy_bc/best.pt
+  python -m aerointercept.evaluation.eval_gym --policy artifacts/runs/legacy_ppo/best.pt \\
+      --episodes 200 --out artifacts/runs/legacy_ppo/evaluation.csv --save-traj 5
 """
 import argparse
 import csv

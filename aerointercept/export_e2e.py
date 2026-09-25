@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None)
     parser.add_argument("--ckpt", required=True)
-    parser.add_argument("--out", default="export/e2e_policy.pt")
+    parser.add_argument("--out", default="artifacts/runs/e2e_bc/export/policy.pt")
     args = parser.parse_args()
 
     cfg = load_config(args.config)

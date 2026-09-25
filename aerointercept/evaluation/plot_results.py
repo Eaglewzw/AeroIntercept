@@ -2,8 +2,8 @@
 
 用法:
   python -m aerointercept.evaluation.plot_results \\
-      --csv results/png_eval.csv results/bc_eval.csv results/rl_eval.csv \\
-      --labels PNG BC RL --out results/plots
+      --csv artifacts/runs/png/evaluation.csv artifacts/runs/legacy_bc/evaluation.csv artifacts/runs/legacy_ppo/evaluation.csv \\
+      --labels PNG BC RL --out artifacts/runs/comparison/plots
 """
 import argparse
 import csv
@@ -87,7 +87,7 @@ def main():
     parser.add_argument("--csv", nargs="+", required=True)
     parser.add_argument("--labels", nargs="+", required=True)
     parser.add_argument("--traj", default=None, help="*_traj.npz 轨迹文件")
-    parser.add_argument("--out", default="results/plots")
+    parser.add_argument("--out", default="artifacts/runs/comparison/plots")
     args = parser.parse_args()
     assert len(args.csv) == len(args.labels)
 

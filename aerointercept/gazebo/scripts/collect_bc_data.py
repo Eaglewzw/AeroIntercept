@@ -30,7 +30,7 @@ def parse_args():
         default="mixed",
     )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--out", default="data/gazebo_experiment_c")
+    parser.add_argument("--out", default="artifacts/data/gazebo_experiment_c")
     parser.add_argument("--socket", default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(

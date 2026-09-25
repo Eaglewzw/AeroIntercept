@@ -5,7 +5,7 @@
 
 用法:
   python -m aerointercept.training.collect_bc_data --episodes 2000 \\
-      --out data/bc_dataset.npz
+      --out artifacts/data/bc_dataset.npz
 """
 import argparse
 import os
@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--episodes", type=int, default=None)
     parser.add_argument("--mode", default="mixed")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--out", default="data/bc_dataset.npz")
+    parser.add_argument("--out", default="artifacts/data/bc_dataset.npz")
     args = parser.parse_args()
 
     cfg = load_config(args.config)

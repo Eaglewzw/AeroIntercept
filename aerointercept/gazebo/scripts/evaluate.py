@@ -29,7 +29,7 @@ def main():
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--socket", default=None)
-    parser.add_argument("--output", default="results/gazebo_e2e_eval.json")
+    parser.add_argument("--output", default="artifacts/runs/gazebo_evaluation/evaluation.json")
     parser.add_argument("--launch", action="store_true")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--mode", choices=(*MODES, "mixed"), default="mixed")

@@ -1,10 +1,10 @@
 """PPO 微调主程序（BC 热启动）
 
 用法:
-  python -m aerointercept.training.train_ppo --bc-init checkpoints/bc_policy.pt \\
-      --out checkpoints/rl_policy.pt --logdir runs/ppo
+  python -m aerointercept.training.train_ppo --bc-init artifacts/runs/legacy_bc/best.pt \\
+      --out artifacts/runs/legacy_ppo/best.pt --logdir artifacts/runs/legacy_ppo
 
-监控: tensorboard --logdir runs/
+监控: tensorboard --logdir artifacts/runs/
 关键曲线: rollout/hit_rate（命中率，核心指标）、rollout/ep_reward
 """
 import argparse
@@ -26,8 +26,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None)
     parser.add_argument("--bc-init", default=None, help="BC 预训练权重（强烈推荐）")
-    parser.add_argument("--out", default="checkpoints/rl_policy.pt")
-    parser.add_argument("--logdir", default="runs/ppo")
+    parser.add_argument("--out", default="artifacts/runs/legacy_ppo/best.pt")
+    parser.add_argument("--logdir", default="artifacts/runs/legacy_ppo")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--mode", default="mixed")

@@ -125,8 +125,8 @@ class _ActorContainer:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None)
-    parser.add_argument("--data", default="data/e2e_bc")
-    parser.add_argument("--out", default="checkpoints/e2e_bc.pt")
+    parser.add_argument("--data", default="artifacts/data/e2e_bc")
+    parser.add_argument("--out", default="artifacts/runs/e2e_bc/best.pt")
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0)
