@@ -52,15 +52,21 @@ def quaternion_wxyz_to_yaw(quaternion: Any) -> float:
 
 
 def target_visibility(
-    relative_body: Any, horizontal_fov: float, vertical_fov: float
+    relative_body: Any, horizontal_fov: float, vertical_fov: float,
+    bounding_radius: float = 0.0,
 ) -> tuple[bool, float]:
     forward, right, down = np.asarray(relative_body, dtype=np.float64)
     horizontal = math.atan2(right, forward)
-    vertical = math.atan2(down, max(math.hypot(forward, right), 1.0e-12))
+    vertical = math.atan2(down, forward)
+    if not math.isfinite(bounding_radius) or bounding_radius < 0:
+        raise ValueError("target bounding radius must be finite and nonnegative")
+    # A partly visible vehicle is not lost merely because its center is
+    # outside the image. Test its conservative enclosing sphere against the
+    # camera frustum planes; this is still geometric, not an occlusion test.
     visible = bool(
-        forward > 0.0
-        and abs(horizontal) <= 0.5 * horizontal_fov
-        and abs(vertical) <= 0.5 * vertical_fov
+        forward + bounding_radius > 0.0
+        and forward*math.sin(horizontal_fov/2)-abs(right)*math.cos(horizontal_fov/2) >= -bounding_radius
+        and forward*math.sin(vertical_fov/2)-abs(down)*math.cos(vertical_fov/2) >= -bounding_radius
     )
     center_error = (
         (horizontal / (0.5 * horizontal_fov)) ** 2
@@ -148,6 +154,11 @@ def termination_flags(
     invalid: bool,
     episode_step: int,
     cfg,
+    current_distance: float | None = None,
+    relative_speed: float | None = None,
+    held_seconds: float = 0.0,
+    contact: bool = False,
+    contact_monitor_ready: bool = False,
 ) -> dict[str, bool]:
     position = np.asarray(interceptor_position, dtype=np.float64)
     altitude = -float(position[2]) if np.isfinite(position[2]) else -math.inf
@@ -156,16 +167,46 @@ def termination_flags(
         "fov_lost": lost_count >= int(cfg.lost_steps),
         "ground": altitude <= float(cfg.ground_height),
         "invalid": bool(invalid),
+        "contact": bool(contact),
         "out_of_bounds": bool(
             np.linalg.norm(position[:2]) > float(cfg.scene_boundary)
             or altitude > float(cfg.maximum_altitude)
         ),
         "timed_out": episode_step >= int(cfg.episode_max_steps),
     }
+    if cfg.get("task_version") == "noncontact_rendezvous_v1":
+        result["invalid"] |= not contact_monitor_ready
+        result["hit"] = bool(
+            current_distance is not None and 0.0 <= current_distance <= float(cfg.hit_radius)
+            and relative_speed is not None and 0.0 <= relative_speed <= float(cfg.rendezvous_max_relative_speed_mps)
+            and held_seconds >= float(cfg.rendezvous_hold_seconds)
+        )
+    # A distance event never overrides a physical failure.
+    result["hit"] &= not any(result[key] for key in ("invalid", "contact", "ground", "out_of_bounds", "fov_lost"))
     result["terminated"] = any(
-        result[name] for name in ("hit", "fov_lost", "ground", "invalid", "out_of_bounds")
+        result[name] for name in ("hit", "fov_lost", "ground", "invalid", "out_of_bounds", "contact")
     )
     return result
+
+
+def vertical_clearance_penalty(relative_ned, cfg) -> float:
+    """Training reward preference for approaching beneath the leader.
+
+    This is not a success condition, action override, or deployment input.
+    Contact monitoring remains the authority for actual physical separation.
+    """
+    weight = float(cfg.get("vertical_clearance_weight", 0.))
+    if weight == 0:
+        return 0.
+    clearance = float(cfg.get("vertical_clearance_m", .14))
+    activation = float(cfg.get("vertical_clearance_activation_m", 2.))
+    if not all(math.isfinite(v) and v > 0 for v in (weight, clearance, activation)):
+        raise ValueError("clearance reward settings must be finite and positive")
+    relative = np.asarray(relative_ned, dtype=np.float64)
+    proximity = max(0., 1.-float(np.linalg.norm(relative))/activation)
+    below_gap = -float(relative[2])
+    deficit = float(np.clip(1.-below_gap/clearance, 0., 2.))
+    return -weight*proximity*deficit**2
 
 
 def compute_reward(
@@ -192,5 +233,6 @@ def compute_reward(
         "invalid": float(cfg.invalid) * float(flags["invalid"]),
         "out_of_bounds": float(cfg.out_of_bounds) * float(flags["out_of_bounds"]),
         "timeout": float(cfg.timeout) * float(flags["timed_out"]),
+        "contact": float(cfg.get("contact", -100.0)) * float(flags.get("contact", False)),
     }
     return float(sum(terms.values())), terms

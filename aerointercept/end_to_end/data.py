@@ -64,36 +64,56 @@ class EpisodeSequenceDataset(Dataset):
     """
 
     def __init__(self, paths, sequence_length: int, history_frames: int = 2,
-                 cache_size: int = 16):
+                 cache_size: int = 16, self_state_dim: int = 0,
+                 camera_supervision: bool = False):
         self.paths = [Path(path) for path in paths]
         self.sequence_length = int(sequence_length)
         self.history_frames = int(history_frames)
         if self.sequence_length < 1 or self.history_frames < 1:
             raise ValueError("sequence_length and history_frames must be positive")
         self.cache_size = max(1, int(cache_size))
+        self.self_state_dim = int(self_state_dim)
+        self.camera_supervision = bool(camera_supervision)
         self._cache = OrderedDict()
         self._windows = []
 
         for path in self.paths:
             with np.load(path, allow_pickle=False) as shard:
-                self._validate_shard(path, shard)
-                length = int(shard["frames"].shape[0])
+                length = self._validate_shard(path, shard)
+                if self.camera_supervision:
+                    if ("camera_target_xy" not in shard or shard["camera_target_xy"].shape != (length, 2)
+                            or not np.isfinite(shard["camera_target_xy"]).all()):
+                        raise ValueError(f"{path}: missing or invalid measured camera projection labels")
+                if self.self_state_dim:
+                    if "self_state" not in shard or shard["self_state"].shape != (length, self.self_state_dim):
+                        raise ValueError(f"{path}: missing or incompatible measured self_state")
+                    if not np.isfinite(shard["self_state"]).all():
+                        raise ValueError(f"{path}: non-finite self_state")
+                    for key in ("self_state_timestamp_ns", "image_timestamp_ns"):
+                        if key not in shard or shard[key].shape != (length,):
+                            raise ValueError(f"{path}: missing own-state synchronization evidence")
+                    ages = shard["image_timestamp_ns"]-shard["self_state_timestamp_ns"]
+                    if np.any(ages < 0) or np.any(ages > 200_000_000):
+                        raise ValueError(f"{path}: future or stale self-state observations")
             for start in range(0, length, self.sequence_length):
                 self._windows.append((path, start, length))
         if not self._windows:
             raise ValueError("dataset contains no transitions")
 
     @staticmethod
-    def _validate_shard(path, shard) -> None:
+    def _validate_shard(path, shard) -> int:
         missing = [name for name in REQUIRED_ARRAYS if name not in shard]
         if missing:
             raise ValueError(f"{path} is missing arrays: {missing}")
-        length = int(shard["frames"].shape[0])
+        # NpzFile does not cache decompressed arrays. Read RGB once; repeatedly
+        # indexing frames here inflated 640x640 dataset startup I/O fivefold.
+        frames = shard["frames"]
+        length = int(frames.shape[0])
         if length < 1:
             raise ValueError(f"{path} is empty")
-        if shard["frames"].ndim != 4 or shard["frames"].shape[1] != 3:
+        if frames.ndim != 4 or frames.shape[1] != 3:
             raise ValueError(f"{path}: frames must have shape [T,3,H,W]")
-        if shard["frames"].dtype != np.uint8:
+        if frames.dtype != np.uint8:
             raise ValueError(f"{path}: frames must use uint8 storage")
         if shard["actions"].shape != (length, 4):
             raise ValueError(f"{path}: actions must have shape [T,4]")
@@ -105,6 +125,7 @@ class EpisodeSequenceDataset(Dataset):
         for name in REQUIRED_ARRAYS[1:]:
             if int(shard[name].shape[0]) != length:
                 raise ValueError(f"{path}: {name} length does not match frames")
+        return length
 
     def __len__(self):
         return len(self._windows)
@@ -116,6 +137,10 @@ class EpisodeSequenceDataset(Dataset):
             return self._cache[key]
         with np.load(path, allow_pickle=False) as shard:
             arrays = {name: shard[name] for name in REQUIRED_ARRAYS}
+            if self.self_state_dim:
+                arrays["self_state"] = shard["self_state"]
+            if self.camera_supervision:
+                arrays["camera_target_xy"] = shard["camera_target_xy"]
         self._cache[key] = arrays
         if len(self._cache) > self.cache_size:
             self._cache.popitem(last=False)
@@ -139,6 +164,10 @@ class EpisodeSequenceDataset(Dataset):
         result = {"frames": frames}
         for name in REQUIRED_ARRAYS[1:]:
             result[name] = arrays[name][raw_indices]
+        if self.self_state_dim:
+            result["self_state"] = arrays["self_state"][raw_indices]
+        if self.camera_supervision:
+            result["camera_target_xy"] = arrays["camera_target_xy"][raw_indices]
         mask = np.ones(valid_length, dtype=np.float32)
 
         padding = self.sequence_length - valid_length

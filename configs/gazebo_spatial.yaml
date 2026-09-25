@@ -1,18 +1,22 @@
-# Gazebo Harmonic + PX4 SITL stage-two overlay.
-# Deep-merged over configs/default.yaml; the legacy 2-D workflow remains intact.
+# Development candidate; same task and sensor inputs, supervised RGB position features.
 gazebo:
   backend: gazebo_harmonic_px4_sitl
   world: aerointercept_park
   target:
-    spawn_position_world: [0.0, 10.0, 0.0]  # Gazebo ENU
-    origin_ned: [10.0, 0.0, 0.0]           # PX4 NED
+    spawn_position_world:
+    - 0.0
+    - 10.0
+    - 0.0
+    origin_ned:
+    - 10.0
+    - 0.0
+    - 0.0
     initial_model_separation_m: 10.0
     scenario_controller: bounded_cooperative_v1
   scene:
     preset: realistic_park
     local_pbr_surface: true
     official_fuel_vegetation: true
-    # Oak/Pine meshes are downloaded once into the normal Gazebo Fuel cache.
     first_launch_requires_network: true
   bridge:
     socket: /tmp/aerointercept_gazebo/bridge.sock
@@ -25,11 +29,8 @@ gazebo:
     source_topic: /camera/image
     transform: full_frame_letterbox_v1
     horizontal_fov: 1.204
-    # Derived from the 16:9 source sensor and horizontal FOV.
     vertical_fov: 0.737596
     color_order: RGB
-    # OakD sensor +X is body-forward. ENU/NED conversion belongs to the world
-    # transform, not to a fabricated -90 degree camera mounting correction.
     mount_yaw_offset_rad: 0.0
     output_width: 640
     output_height: 640
@@ -39,10 +40,10 @@ gazebo:
     yaw_rate_max: 1.0
   expert:
     controller: cooperative_rendezvous_v1
-    # Fixed cooperative formation offset, slowing to match leader velocity.
-    # Keep the center within the camera's vertical FOV near 0.5 m and
-    # keep the leader's feet below the follower's main body plane.
-    offset_ned: [-0.46, 0.0, 0.14]
+    offset_ned:
+    - -0.46
+    - 0.0
+    - 0.14
     position_gain: 1.0
     relative_velocity_gain: 0.6
     target_acceleration_feedforward_seconds: 0.4
@@ -53,7 +54,10 @@ gazebo:
     yaw_gain: 2.0
     action_smoothing: 0.05
   task:
-    reset_position_ned: [0.0, 0.0, -6.0]
+    reset_position_ned:
+    - 0.0
+    - 0.0
+    - -6.0
     reset_yaw: 0.0
     look_at_target: true
     reset_yaw_tolerance_rad: 0.15
@@ -67,7 +71,7 @@ gazebo:
     hit_radius: 0.5
     task_version: noncontact_rendezvous_v1
     center_reference: gazebo_base_link_center_enu_to_ned_v2
-    target_bounding_radius_m: 0.4  # x500 envelope; partial image visibility counts
+    target_bounding_radius_m: 0.4
     rendezvous_max_relative_speed_mps: 0.5
     rendezvous_hold_seconds: 0.3
     rendezvous_settle_seconds: 1.0
@@ -93,7 +97,6 @@ gazebo:
     ros_workspace: /home/verser/ros2_ws/install/setup.bash
     px4_root: /home/verser/PX4-Autopilot
     target_controller: /home/verser/ros2_ws/build/uav_target_sim/uav_target_sim
-
 end_to_end:
   render:
     source: Gazebo OakD-Lite IMX214 / full-frame letterbox
@@ -107,7 +110,6 @@ end_to_end:
     storage_dtype: uint8
     normalization: float32/255 then ImageNet mean/std
   model:
-    # Experiment C: ImageNet semantics plus stride-8/16 fusion for small UAVs.
     encoder_type: resnet18_multiscale_v1
     pretrained_weights: IMAGENET1K_V1
     encoder_multiscale_channels: 96
@@ -116,26 +118,27 @@ end_to_end:
     self_state_dim: 6
     self_velocity_scale: 8.0
     self_angular_velocity_scale: 2.0
+    spatial_coordinates: true
   bc:
     episodes: 48
     sequence_length: 16
     batch_size: 2
     epochs: 20
-    learning_rate: 3.0e-4
-    backbone_learning_rate: 1.0e-5
+    learning_rate: 0.0003
+    backbone_learning_rate: 1.0e-05
     backbone_freeze_epochs: 3
     keep_backbone_batch_norm_eval: true
     val_fraction: 0.1
     num_workers: 0
-    # 6,681 raw RGB frames occupy about 7.7 GiB; the 32 GiB host can retain
-    # these episodes instead of repeatedly decompressing random NPZ windows.
     cache_episodes: 48
   ppo:
     num_envs: 1
     rollout_steps: 16
     total_steps: 512
     num_minibatches: 4
-    backbone_learning_rate: 5.0e-6
+    backbone_learning_rate: 5.0e-06
     log_std_min: -5.0
     log_std_max: -3.0
     entropy_coef: 0.0
+  auxiliary:
+    spatial_coef: 0.05

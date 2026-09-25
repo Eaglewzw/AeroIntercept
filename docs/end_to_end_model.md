@@ -21,18 +21,24 @@ Gazebo 相机原始画面经过等比例 letterbox，不裁剪目标。模型内
 ## Actor
 
 ```text
-前一帧 RGB ─→ 共享轻量 CNN ─→ 空间注意力 ─→ 128 维帧 token ─┐
+前一帧 RGB ─→ 共享视觉主干 ─→ 多尺度融合/空间注意力 ─→ 128 维帧 token ─┐
                                                                ├→ 时序 Transformer
-当前帧 RGB ─→ 共享轻量 CNN ─→ 空间注意力 ─→ 128 维帧 token ─┘
+当前帧 RGB ─→ 共享视觉主干 ─→ 多尺度融合/空间注意力 ─→ 128 维帧 token ─┘
                                                                         │
                          ┌──────────────────────┬───────────────────────┼──────────┐
                          ↓                      ↓                       ↓          ↓
                     四维动作预测          未来位置预测             碰撞风险    置信度
 ```
 
-共享视觉编码器使用深度可分离残差块，通道为 `[24, 40, 64, 96]`，总下采样倍数为 8。
-640×640 输入得到 96×80×80 特征图。一个 1×1 卷积生成空间注意力，并在 6400 个位置
-上做 softmax 加权池化。每帧最终压缩为一个 128 维 token。
+Gazebo 实验 C 默认使用 ImageNet `ResNet-18 IMAGENET1K_V1`。主干截取至 `layer3`，
+融合 stride-8 的 128 通道定位特征与 stride-16 的 256 通道语义特征，得到
+96×80×80 特征图。一个 1×1 卷积在 6400 个位置上生成 softmax 空间注意力，每帧仍只
+压缩为一个 128 维 token。因此升级视觉表征不会扩大时序 Transformer 的 token 数量。
+
+原轻量二维后端继续使用深度可分离残差编码器 `[24, 40, 64, 96]`。通过
+`encoder_type: custom_v1` 与 `resnet18_multiscale_v1` 显式区分，两种 checkpoint 均记录
+完整模型配置，不能错误地交叉恢复。Gazebo 实验 C Actor 参数量约为 313 万，其中
+ImageNet 主干在 BC 初期冻结 3 epoch，之后以低于任务头的学习率微调。
 
 时序部分使用两层 Transformer Encoder：embedding 128、4 个 attention heads、FFN 256。
 Transformer 只处理前后两帧 token，不直接处理 80×80 空间 token。
@@ -114,6 +120,13 @@ loss = policy_loss
 
 图像 rollout 以 CPU uint8 保存，minibatch 才传入 CUDA。Gazebo 默认冒烟配置为单
 环境、16-step rollout、512 total steps 和 encoder chunk size 4。
+
+## 实验 C 训练顺序
+
+实验 C 使用 `ImageNet ResNet-18 → Gazebo 专家行为克隆 → Gazebo PPO`。专家控制器
+只在数据采集阶段读取位置、速度与 yaw，以前置追踪生成动作标签；这些真值不会写入
+图像观察，也不会成为 Actor 参数。辅助标签和 15 维 Critic 状态同样仅用于损失计算。
+完整假设、命令与验收记录见 [实验 C 记录](experiment_c.md)。
 
 ## Checkpoint 与部署
 

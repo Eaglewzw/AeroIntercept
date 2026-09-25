@@ -12,11 +12,14 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+from aerointercept.config import DotDict
 from aerointercept.end_to_end.policy import EndToEndActorCritic
-from aerointercept.gazebo.checkpoint import load_model_weights, save
+from aerointercept.end_to_end.optimization import adamw_with_backbone_lr
+from aerointercept.gazebo.checkpoint import load_model_weights, save, validate_task_checkpoint
 from aerointercept.gazebo.config import load_gazebo_config
 from aerointercept.gazebo.environment import GazeboVectorEnv
 from aerointercept.gazebo.process import maybe_launch
+from aerointercept.gazebo.scenarios import MODES
 from aerointercept.training.train_e2e_ppo import ImageRolloutBuffer, ppo_update
 
 
@@ -31,9 +34,13 @@ def parse_args():
     parser.add_argument("--total-steps", type=int, default=512)
     parser.add_argument("--rollout-steps", type=int, default=16)
     parser.add_argument("--checkpoint", default=None)
+    parser.add_argument(
+        "--bc-init", default=None,
+        help="Experiment C behavior-cloning checkpoint used only for weight initialization",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--logdir", default="runs/gazebo_e2e")
-    parser.add_argument("--mode", choices=("circle", "sinusoidal", "random_walk", "mixed"), default="mixed")
+    parser.add_argument("--mode", choices=(*MODES, "mixed"), default="mixed")
     parser.add_argument("--checkpoint-interval", type=int, default=256)
     parser.add_argument("--encoder-chunk-size", type=int, default=4)
     parser.add_argument("--launch", action="store_true",
@@ -69,10 +76,16 @@ def main():
     rollout_size = args.num_envs * args.rollout_steps
     if args.total_steps % rollout_size:
         raise ValueError("--total-steps must be divisible by num_envs * rollout_steps")
+    if args.bc_init and args.checkpoint:
+        raise ValueError("use either --bc-init or --checkpoint, not both")
+    if args.resume and not args.checkpoint:
+        raise ValueError("--resume requires --checkpoint")
 
     cfg = load_gazebo_config(args.config)
-    cfg.end_to_end.model.encoder_chunk_size = args.encoder_chunk_size
-    cfg.end_to_end.ppo.num_minibatches = max(4, int(cfg.end_to_end.ppo.num_minibatches))
+    cfg["end_to_end"]["model"]["encoder_chunk_size"] = args.encoder_chunk_size
+    cfg["end_to_end"]["ppo"]["num_minibatches"] = max(
+        4, int(cfg.end_to_end.ppo.num_minibatches),
+    )
     sockets = args.socket or [str(cfg.gazebo.bridge.socket)]
     if len(sockets) != args.num_envs:
         raise ValueError(
@@ -92,26 +105,41 @@ def main():
     environments = None
     writer = None
     try:
-        environments = GazeboVectorEnv(cfg, sockets)
-        frames, training_info, _ = environments.reset()
+        environments = GazeboVectorEnv(cfg, sockets, mode=args.mode, seed=args.seed,
+                                       restart_world=(lambda _: stack.restart()) if stack else None)
+        frames, training_info, reset_infos = environments.reset()
         if frames.shape[1:] != (2, 3, 640, 640) or frames.dtype != np.uint8:
             raise RuntimeError(f"Gazebo observation contract failed: {frames.shape} {frames.dtype}")
         if training_info["critic_obs"].shape != (args.num_envs, 15):
             raise RuntimeError("Gazebo privileged Critic contract is not [N,15]")
 
-        model = EndToEndActorCritic(cfg.end_to_end.model).to(device).eval()
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=float(cfg.end_to_end.ppo.learning_rate),
+        model_config = dict(cfg.end_to_end.model)
+        construction_config = DotDict(dict(model_config))
+        # A BC/PPO checkpoint already contains the complete trunk.  Avoid a
+        # network request merely to construct a model that is immediately restored.
+        if args.bc_init or args.checkpoint:
+            construction_config["pretrained_weights"] = None
+        model = EndToEndActorCritic(construction_config).to(device).eval()
+        optimizer = adamw_with_backbone_lr(
+            model,
+            float(cfg.end_to_end.ppo.learning_rate),
+            cfg.end_to_end.ppo.get("backbone_learning_rate"),
             weight_decay=1.0e-4,
         )
         global_step = 0
         best_hit_rate = -1.0
-        if args.checkpoint:
-            source = Path(args.checkpoint)
+        initialization_source = args.bc_init or args.checkpoint
+        lineage = {
+            "experiment": "C",
+            "initialization": "imagenet_resnet18",
+        }
+        if initialization_source:
+            source = Path(initialization_source)
             checkpoint = torch.load(source, map_location=device, weights_only=False)
+            validate_task_checkpoint(checkpoint, cfg)
             if checkpoint.get("backend") not in (None, "gazebo_harmonic_px4_sitl"):
                 raise ValueError("checkpoint was produced by a different simulator backend")
-            load_model_weights(model, checkpoint, dict(cfg.end_to_end.model))
+            load_model_weights(model, checkpoint, model_config)
             if args.resume:
                 if "optimizer" not in checkpoint:
                     raise ValueError("--resume checkpoint has no optimizer state")
@@ -119,6 +147,14 @@ def main():
                 global_step = int(checkpoint.get("global_step", 0))
                 best_hit_rate = float(checkpoint.get("best_hit_rate", -1.0))
                 _restore_rng(checkpoint)
+                lineage = dict(checkpoint.get("lineage", lineage))
+            elif args.bc_init:
+                if checkpoint.get("training_stage") != "behavior_cloning":
+                    raise ValueError("--bc-init must point to a behavior-cloning checkpoint")
+                lineage["behavior_cloning_checkpoint"] = str(source.resolve())
+                lineage["behavior_cloning_validation_loss"] = float(
+                    checkpoint.get("validation_loss", float("nan"))
+                )
             print(
                 f"[AeroIntercept] loaded {source} resume={args.resume} global_step={global_step}",
                 flush=True,
@@ -133,6 +169,7 @@ def main():
         recent_outcomes = deque(maxlen=200)
         recent_minimum = deque(maxlen=200)
         recent_lengths = deque(maxlen=200)
+        recent_simulation_seconds = deque(maxlen=200)
         episode_rewards = np.zeros(args.num_envs, dtype=np.float64)
         initial_parameter = model.actor.action_head[-1].weight.detach().clone()
         parameter_delta = 0.0
@@ -146,7 +183,9 @@ def main():
 
         for update in range(1, updates + 1):
             buffer = ImageRolloutBuffer(
-                args.rollout_steps, args.num_envs, frames.shape[1:], 15, 4
+                args.rollout_steps, args.num_envs, frames.shape[1:], 15, 4,
+                self_state_dim=int(cfg.end_to_end.model.get("self_state_dim", 0)),
+                camera_supervision=float(cfg.end_to_end.auxiliary.get("spatial_coef", 0.)) > 0,
             )
             model.eval()
             for _ in range(args.rollout_steps):
@@ -155,10 +194,12 @@ def main():
                     device, non_blocking=True
                 )
                 with torch.no_grad():
+                    own_states = environments.actor_self_states()
                     outputs = model.act(
                         frame_tensor, privileged, False,
                         cfg.end_to_end.ppo.log_std_min,
                         cfg.end_to_end.ppo.log_std_max,
+                        self_state=None if own_states is None else torch.from_numpy(own_states).to(device),
                     )
                 actions, log_probability, values = outputs[:3]
                 (next_frames, rewards, terminated, truncated,
@@ -167,15 +208,26 @@ def main():
                 buffer.add(
                     frames, training_info, actions, log_probability,
                     rewards, dones.astype(np.float32), values,
+                    self_state=own_states,
                 )
                 episode_rewards += rewards
                 for index, info in enumerate(infos):
+                    if "reset_recovery" in info:
+                        print(f"[AeroIntercept] reset recovery: {info['reset_recovery']}", flush=True)
                     final = info.get("final")
                     if final is not None:
+                        with (logdir / "episodes.jsonl").open("a", encoding="utf-8") as stream:
+                            stream.write(json.dumps({
+                                **final, "global_step": global_step + args.num_envs,
+                                "environment": index, "reset": reset_infos[index],
+                                "reset_recovery": info.get("reset_recovery"),
+                            }, allow_nan=False) + "\n")
+                        reset_infos[index] = info["reset"]
                         recent_rewards.append(float(final["episode_reward"]))
                         recent_outcomes.append(final["outcome"])
                         recent_minimum.append(float(final["minimum_distance"]))
                         recent_lengths.append(int(final["episode_length"]))
+                        recent_simulation_seconds.append(final.get("episode_simulation_seconds"))
                         episode_rewards[index] = 0.0
                 frames = next_frames
                 training_info = next_training
@@ -191,72 +243,80 @@ def main():
                 cfg.end_to_end.ppo.gae_lambda,
             )
             update_started = time.perf_counter()
-            latest_metrics = ppo_update(
-                model, optimizer, buffer, cfg.end_to_end.ppo,
-                cfg.end_to_end.auxiliary, device,
-            )
-            torch.cuda.synchronize(device)
-            update_seconds = time.perf_counter() - update_started
-            ppo_seconds += update_seconds
-            parameter_delta = float(
-                (model.actor.action_head[-1].weight - initial_parameter)
-                .detach().abs().max()
-            )
-            peak_gpu_mb = max(peak_gpu_mb, _gpu_usage_mb())
-            elapsed = time.perf_counter() - started
-            hit_rate = (
-                sum(outcome == "hit" for outcome in recent_outcomes) / len(recent_outcomes)
-                if recent_outcomes else 0.0
-            )
-            scalar_metrics = {
-                **latest_metrics,
-                "hit_rate": hit_rate,
-                "episode_reward": float(np.mean(recent_rewards)) if recent_rewards else 0.0,
-                "minimum_distance": float(np.mean(recent_minimum)) if recent_minimum else float("nan"),
-                "interception_time": (
-                    float(np.mean(recent_lengths)) / 20.0 if recent_lengths else float("nan")
-                ),
-                "fov_lost_rate": (
-                    sum(value == "fov_lost" for value in recent_outcomes) / len(recent_outcomes)
+            with environments.paused():
+                latest_metrics = ppo_update(
+                    model, optimizer, buffer, cfg.end_to_end.ppo,
+                    cfg.end_to_end.auxiliary, device,
+                )
+                torch.cuda.synchronize(device)
+                update_seconds = time.perf_counter() - update_started
+                ppo_seconds += update_seconds
+                parameter_delta = float(
+                    (model.actor.action_head[-1].weight - initial_parameter)
+                    .detach().abs().max()
+                )
+                peak_gpu_mb = max(peak_gpu_mb, _gpu_usage_mb())
+                elapsed = time.perf_counter() - started
+                hit_rate = (
+                    sum(outcome == "hit" for outcome in recent_outcomes) / len(recent_outcomes)
                     if recent_outcomes else 0.0
-                ),
-                "ground_collision_rate": (
-                    sum(value == "ground" for value in recent_outcomes) / len(recent_outcomes)
-                    if recent_outcomes else 0.0
-                ),
-                "episode_length": float(np.mean(recent_lengths)) if recent_lengths else 0.0,
-                "training_fps": update * rollout_size / elapsed,
-                "camera_fps": (environments.camera_frames - camera_start) / elapsed,
-                "simulation_fps": update * rollout_size / elapsed,
-                "gpu_memory_mb": peak_gpu_mb,
-                "torch_peak_memory_mb": torch.cuda.max_memory_allocated() / 2**20,
-                "ppo_update_seconds": update_seconds,
-                "parameter_delta": parameter_delta,
-            }
-            for name, value in scalar_metrics.items():
-                if np.isfinite(value):
-                    writer.add_scalar(name, value, global_step)
-            writer.flush()
-            print(
-                f"[AeroIntercept] update={update}/{updates} step={global_step} "
-                f"policy={latest_metrics['policy_loss']:.4f} "
-                f"value={latest_metrics['value_loss']:.4f} "
-                f"kl={latest_metrics['approx_kl']:.5f} "
-                f"delta={parameter_delta:.3e} gpu={peak_gpu_mb:.0f}MB",
-                flush=True,
-            )
-            checkpoint_kwargs = dict(
-                model=model, optimizer=optimizer, cfg=cfg,
-                global_step=global_step, seed=args.seed,
-                best_hit_rate=max(best_hit_rate, hit_rate), metrics=scalar_metrics,
-            )
-            if hit_rate > best_hit_rate:
-                best_hit_rate = hit_rate
-                save(best_path, **checkpoint_kwargs)
-            run_steps = update * rollout_size
-            if run_steps % args.checkpoint_interval == 0 or update == updates:
-                save(last_path, **checkpoint_kwargs)
-                save(checkpoint_dir / f"step_{global_step:09d}.pt", **checkpoint_kwargs)
+                )
+                scalar_metrics = {
+                    **latest_metrics,
+                    "hit_rate": hit_rate,
+                    "completed_episodes": len(recent_outcomes),
+                    "contact_rate": (
+                        sum(value == "contact" for value in recent_outcomes) / len(recent_outcomes)
+                        if recent_outcomes else 0.0
+                    ),
+                    "episode_reward": float(np.mean(recent_rewards)) if recent_rewards else 0.0,
+                    "minimum_distance": float(np.mean(recent_minimum)) if recent_minimum else float("nan"),
+                    "episode_simulation_seconds": (
+                        float(np.mean([value for value in recent_simulation_seconds if value is not None]))
+                        if any(value is not None for value in recent_simulation_seconds) else float("nan")
+                    ),
+                    "fov_lost_rate": (
+                        sum(value == "fov_lost" for value in recent_outcomes) / len(recent_outcomes)
+                        if recent_outcomes else 0.0
+                    ),
+                    "ground_collision_rate": (
+                        sum(value == "ground" for value in recent_outcomes) / len(recent_outcomes)
+                        if recent_outcomes else 0.0
+                    ),
+                    "episode_length": float(np.mean(recent_lengths)) if recent_lengths else 0.0,
+                    "training_fps": update * rollout_size / elapsed,
+                    "camera_fps": (environments.camera_frames - camera_start) / elapsed,
+                    "simulation_fps": update * rollout_size / elapsed,
+                    "gpu_memory_mb": peak_gpu_mb,
+                    "torch_peak_memory_mb": torch.cuda.max_memory_allocated() / 2**20,
+                    "ppo_update_seconds": update_seconds,
+                    "parameter_delta": parameter_delta,
+                }
+                for name, value in scalar_metrics.items():
+                    if np.isfinite(value):
+                        writer.add_scalar(name, value, global_step)
+                writer.flush()
+                print(
+                    f"[AeroIntercept] update={update}/{updates} step={global_step} "
+                    f"policy={latest_metrics['policy_loss']:.4f} "
+                    f"value={latest_metrics['value_loss']:.4f} "
+                    f"kl={latest_metrics['approx_kl']:.5f} "
+                    f"delta={parameter_delta:.3e} gpu={peak_gpu_mb:.0f}MB",
+                    flush=True,
+                )
+                checkpoint_kwargs = dict(
+                    model=model, optimizer=optimizer, cfg=cfg,
+                    global_step=global_step, seed=args.seed,
+                    best_hit_rate=max(best_hit_rate, hit_rate), metrics=scalar_metrics,
+                    lineage=lineage,
+                )
+                if hit_rate > best_hit_rate or not best_path.exists():
+                    best_hit_rate = hit_rate
+                    save(best_path, **checkpoint_kwargs)
+                run_steps = update * rollout_size
+                if run_steps % args.checkpoint_interval == 0 or update == updates:
+                    save(last_path, **checkpoint_kwargs)
+                    save(checkpoint_dir / f"step_{global_step:09d}.pt", **checkpoint_kwargs)
 
         if parameter_delta <= 0.0:
             raise AssertionError("CUDA PPO completed without changing Actor parameters")
@@ -279,6 +339,7 @@ def main():
             "ppo_update_seconds": ppo_seconds,
             "elapsed_seconds": elapsed,
             "metrics": scalar_metrics,
+            "lineage": lineage,
         }
         print("AEROINTERCEPT_GAZEBO_PPO=" + json.dumps(report), flush=True)
     finally:

@@ -16,11 +16,12 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from collections import deque
 
 import numpy as np
 import rclpy
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand
-from px4_msgs.msg import VehicleOdometry, VehicleStatus
+from px4_msgs.msg import VehicleOdometry, VehicleStatus, TimesyncStatus
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.executors import ExternalShutdownException
@@ -34,6 +35,10 @@ from aerointercept.gazebo.protocol import (
     send_packet,
 )
 from aerointercept.gazebo.task_logic import camera_target_yaw_geometry
+from aerointercept.gazebo.frames import camera_relative_frd, PHYSICAL_STATE_SOURCE
+from aerointercept.gazebo.scenarios import Scenario, TRAIN_MODES, MODES
+from aerointercept.gazebo.simulator_truth import SimulatorTruth
+from aerointercept.gazebo.self_state import SELF_STATE_SOURCE, px4_self_state, past_self_state
 
 
 def _finite_vector(values, size: int, name: str) -> np.ndarray:
@@ -53,10 +58,22 @@ class GazeboRosBridge(Node):
         super().__init__("aerointercept_gazebo_bridge")
         self.args = args
         self._condition = threading.Condition()
+        self._truth = SimulatorTruth(self._condition)
+        initial_mode = TRAIN_MODES[0] if args.mode == "mixed" else args.mode
+        self._scenario = Scenario.sample(initial_mode, args.seed, args.reset_position_ned)
+        self._scenario_started_ns = None
+        self._episode_contact_baseline = 0
+        self._reset_separation_position = None
+        self._reset_target_hold = None
+        self._terminal_exit = None
         self._image_bytes = None
         self._image_metadata = None
+        self._image_timestamp_ns = None
         self._sequence = 0
         self._interceptor = None
+        self._own_state_history = deque(maxlen=256)
+        self._own_state_error = None
+        self._px4_timesync_offset_us = None
         self._target = None
         self._vehicle_status = None
         self._target_status = None
@@ -81,6 +98,8 @@ class GazeboRosBridge(Node):
             self._interceptor_callback,
             qos_profile_sensor_data,
         )
+        self.create_subscription(TimesyncStatus, "/px4_1/fmu/out/timesync_status",
+                                 self._timesync_callback, qos_profile_sensor_data)
         self.create_subscription(
             VehicleOdometry,
             "/px4_2/fmu/out/vehicle_odometry",
@@ -89,13 +108,13 @@ class GazeboRosBridge(Node):
         )
         self.create_subscription(
             VehicleStatus,
-            "/px4_1/fmu/out/vehicle_status",
+            "/px4_1/fmu/out/vehicle_status_v1",
             self._status_callback,
             qos_profile_sensor_data,
         )
         self.create_subscription(
             VehicleStatus,
-            "/px4_2/fmu/out/vehicle_status",
+            "/px4_2/fmu/out/vehicle_status_v1",
             self._target_status_callback,
             qos_profile_sensor_data,
         )
@@ -110,6 +129,12 @@ class GazeboRosBridge(Node):
         )
         self._target_command_publisher = self.create_publisher(
             VehicleCommand, "/px4_2/fmu/in/vehicle_command", 10
+        )
+        self._target_offboard_publisher = self.create_publisher(
+            OffboardControlMode, "/px4_2/fmu/in/offboard_control_mode", 10
+        )
+        self._target_setpoint_publisher = self.create_publisher(
+            TrajectorySetpoint, "/px4_2/fmu/in/trajectory_setpoint", 10
         )
         self.create_timer(1.0 / float(args.control_rate), self._control_timer)
         self._server_thread = threading.Thread(target=self._serve, daemon=True)
@@ -134,6 +159,10 @@ class GazeboRosBridge(Node):
             return
         with self._condition:
             self._image_bytes = output.tobytes()
+            self._image_timestamp_ns = (
+                int(message.header.stamp.sec) * 1_000_000_000
+                + int(message.header.stamp.nanosec)
+            )
             self._image_metadata = {
                 **transform,
                 "source": "Gazebo Harmonic sensor via ros_gz_bridge",
@@ -159,9 +188,29 @@ class GazeboRosBridge(Node):
             "timestamp": int(message.timestamp),
         }
 
+    def _timesync_callback(self, message: TimesyncStatus) -> None:
+        if message.source_protocol == TimesyncStatus.SOURCE_PROTOCOL_DDS:
+            with self._condition:
+                self._px4_timesync_offset_us = int(message.estimated_offset)
+                self._condition.notify_all()
+
     def _interceptor_callback(self, message: VehicleOdometry) -> None:
         with self._condition:
             self._interceptor = self._odometry(message, np.zeros(3))
+            try:
+                values = px4_self_state(message.q, message.velocity, message.angular_velocity,
+                                        message.velocity_frame, message.pose_frame)
+                if self._px4_timesync_offset_us is None:
+                    raise ValueError("PX4 DDS time synchronization is not ready")
+                # uXRCE serializes timestamp_sample - estimated_offset. Undo
+                # that conversion using PX4's own DDS timesync publication.
+                timestamp_ns = (int(message.timestamp_sample)+self._px4_timesync_offset_us)*1000
+                if self._own_state_history and timestamp_ns < self._own_state_history[-1][0]:
+                    self._own_state_history.clear()
+                self._own_state_history.append((timestamp_ns, values))
+                self._own_state_error = None
+            except ValueError as exc:
+                self._own_state_error = str(exc)
             self._condition.notify_all()
 
     def _target_callback(self, message: VehicleOdometry) -> None:
@@ -236,6 +285,56 @@ class GazeboRosBridge(Node):
             yaw = self._yaw
             velocity = self._velocity.copy()
             yaw_rate = self._yaw_rate
+            if self._truth.ready:
+                truth_interceptor = self._truth.poses["x500_depth_1"]
+                truth_target = self._truth.poses["x500_2"]
+                if self._terminal_exit is not None:
+                    separation = truth_interceptor["position"]-truth_target["position"]
+                    if np.linalg.norm(separation) >= 1.5:
+                        self._terminal_exit = None
+                        self._position = truth_interceptor["position"].copy()
+                        self._scenario.start_ned = truth_target["position"].tolist()
+                        position = self._position.copy()
+                    else:
+                        separation[2] = 0.
+                        separation /= max(float(np.linalg.norm(separation)), 1e-6)
+                        mode = "velocity"
+                        velocity = self._terminal_exit["velocity"] + .6*separation
+                        yaw_rate = 0.
+                if self._reset_separation_position is not None:
+                    if np.linalg.norm(truth_target["position"]-truth_interceptor["position"]) >= 2.0:
+                        self._reset_separation_position = None
+                        self._reset_target_hold = None
+                    else:
+                        position = self._reset_separation_position.copy()
+                if mode == "position" and self._interceptor is not None:
+                    if self._look_at_target:
+                        _, yaw, _ = camera_target_yaw_geometry(
+                            truth_interceptor["position"], truth_target["position"],
+                            truth_interceptor["yaw"], self.args.camera_mount_yaw_offset,
+                        )
+                        yaw += self._interceptor["yaw"] - truth_interceptor["yaw"]
+                    # World setpoint -> each EKF's local origin, reset control only.
+                    position += self._interceptor["position"] - truth_interceptor["position"]
+                seconds = 0.0 if self._scenario_started_ns is None else max(
+                    0.0, (truth_target["timestamp_ns"]-self._scenario_started_ns)*1e-9,
+                )
+                target_world = self._scenario.position(seconds)
+                if self._reset_target_hold is not None:
+                    target_world = self._reset_target_hold.copy()
+                if self._terminal_exit is not None:
+                    dt = max(0., (truth_target["timestamp_ns"]-self._terminal_exit["timestamp_ns"])*1e-9)
+                    target_world = self._terminal_exit["position"]+dt*self._terminal_exit["velocity"]
+                target_local = target_world - np.asarray(self.args.target_origin_ned)
+                if self._target is not None:
+                    target_local += self._target["position"] - truth_target["position"]
+            else:
+                seconds = 0.0
+                target_local = np.asarray(self._scenario.start_ned)-self.args.target_origin_ned
+            target_velocity = (self._scenario.velocity(seconds).astype(np.float32).tolist()
+                               if self._scenario_started_ns is not None else [0., 0., 0.])
+            if self._terminal_exit is not None:
+                target_velocity = self._terminal_exit["velocity"].astype(np.float32).tolist()
         offboard = OffboardControlMode()
         offboard.timestamp = self._timestamp()
         offboard.position = mode == "position"
@@ -259,6 +358,18 @@ class GazeboRosBridge(Node):
             setpoint.yaw = nan
             setpoint.yawspeed = float(yaw_rate)
         self._setpoint_publisher.publish(setpoint)
+        target_offboard = OffboardControlMode()
+        target_offboard.timestamp = self._timestamp()
+        target_offboard.position = True
+        self._target_offboard_publisher.publish(target_offboard)
+        target_setpoint = TrajectorySetpoint()
+        target_setpoint.timestamp = self._timestamp()
+        target_setpoint.position = np.asarray(target_local, dtype=np.float32).tolist()
+        target_setpoint.velocity = target_velocity
+        target_setpoint.acceleration = [nan, nan, nan]
+        target_setpoint.yaw = 0.0
+        target_setpoint.yawspeed = nan
+        self._target_setpoint_publisher.publish(target_setpoint)
 
         self._setpoint_count += 1
         if self._setpoint_count >= int(self.args.warmup_setpoints):
@@ -309,12 +420,16 @@ class GazeboRosBridge(Node):
                 self._last_reported_target_state = target_flight_state
 
     def _ready(self) -> bool:
-        return self._image_bytes is not None and self._interceptor is not None and self._target is not None
+        return (self._image_bytes is not None and self._interceptor is not None
+                and self._target is not None and self._truth.ready)
 
-    def _snapshot(self, after_sequence: int, timeout: float) -> dict:
+    def _snapshot(self, after_sequence: int, timeout: float, after_image_ns: int = -1) -> dict:
         deadline = time.monotonic() + timeout
         with self._condition:
-            while (not self._ready() or self._sequence <= after_sequence) and not self._stop.is_set():
+            while (not self._ready() or self._sequence <= after_sequence
+                   or self._image_timestamp_ns <= after_image_ns
+                   or past_self_state(self._own_state_history, self._image_timestamp_ns) is None
+                   or not self._truth.ready_at(self._image_timestamp_ns)) and not self._stop.is_set():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0.0:
                     missing = []
@@ -324,12 +439,20 @@ class GazeboRosBridge(Node):
                         missing.append("interceptor_odometry")
                     if self._target is None:
                         missing.append("target_odometry")
+                    if self._image_timestamp_ns is not None and past_self_state(
+                        self._own_state_history, self._image_timestamp_ns
+                    ) is None:
+                        missing.append("causal_px4_self_state")
                     raise TimeoutError(
-                        f"no newer synchronized snapshot; missing={missing} sequence={self._sequence}"
+                        f"no newer synchronized snapshot; missing={missing} sequence={self._sequence} "
+                        f"image_ns={self._image_timestamp_ns} own_ns={self._own_state_history[-1][0] if self._own_state_history else None} "
+                        f"own_error={self._own_state_error}"
                     )
                 self._condition.wait(min(remaining, 0.25))
-            interceptor = self._interceptor
-            target = self._target
+            aligned_truth = self._truth.at_timestamp(self._image_timestamp_ns)
+            own_timestamp, own_values = past_self_state(self._own_state_history, self._image_timestamp_ns)
+            interceptor = aligned_truth["x500_depth_1"]
+            target = aligned_truth["x500_2"]
             target_bearing, desired_yaw, yaw_error = camera_target_yaw_geometry(
                 interceptor["position"], target["position"], interceptor["yaw"],
                 self.args.camera_mount_yaw_offset,
@@ -337,9 +460,15 @@ class GazeboRosBridge(Node):
             return {
                 "sequence": self._sequence,
                 "image": self._image_bytes,
+                "image_timestamp_ns": self._image_timestamp_ns,
                 "image_shape": (640, 640, 3),
                 "image_dtype": "uint8",
                 "camera_metadata": dict(self._image_metadata),
+                "self_state": own_values.tolist(),
+                "self_state_source": SELF_STATE_SOURCE,
+                "self_state_timestamp_ns": own_timestamp,
+                "self_state_age_seconds": (self._image_timestamp_ns-own_timestamp)*1e-9,
+                "self_state_clock": "px4_dds_timesync_to_simulation_v1",
                 "interceptor_position": interceptor["position"].tolist(),
                 "interceptor_velocity": interceptor["velocity"].tolist(),
                 "interceptor_yaw": float(interceptor["yaw"]),
@@ -350,8 +479,19 @@ class GazeboRosBridge(Node):
                 "camera_look_at_active": bool(self._look_at_target),
                 "target_position": target["position"].tolist(),
                 "target_velocity": target["velocity"].tolist(),
-                "interceptor_timestamp": interceptor["timestamp"],
-                "target_timestamp": target["timestamp"],
+                "interceptor_timestamp": interceptor["timestamp_ns"] // 1000,
+                "target_timestamp": target["timestamp_ns"] // 1000,
+                "physical_state_source": PHYSICAL_STATE_SOURCE,
+                "pose_image_skew_seconds": (interceptor["timestamp_ns"]-self._image_timestamp_ns)*1e-9,
+                "camera_relative_frd": camera_relative_frd(
+                    interceptor["position"], target["position"],
+                    interceptor["quaternion_enu_wxyz"],
+                ).tolist(),
+                "contact_monitor_ready": self._truth.contact_seen,
+                "hold_complete": self._terminal_exit is None,
+                "contact_count": self._truth.contact_count - self._episode_contact_baseline,
+                "last_contact": self._truth.last_contact,
+                "scenario": self._scenario.metadata(),
                 "vehicle_status": dict(self._vehicle_status) if self._vehicle_status else None,
                 "target_vehicle_status": dict(self._target_status) if self._target_status else None,
             }
@@ -368,6 +508,9 @@ class GazeboRosBridge(Node):
                     "backend": "gazebo_px4",
                     "simulator": "Gazebo Harmonic",
                     "physics": "gz-sim physics",
+                    "scenario_control": "bounded_cooperative_v1",
+                    "default_mode": self.args.mode,
+                    "default_seed": self.args.seed,
                     "vehicle_status": dict(self._vehicle_status) if self._vehicle_status else None,
                     "target_vehicle_status": dict(self._target_status) if self._target_status else None,
                 }
@@ -375,7 +518,31 @@ class GazeboRosBridge(Node):
             return {"snapshot": self._snapshot(
                 int(message.get("after_sequence", -1)),
                 float(message.get("timeout", 3.0)),
+                int(message.get("after_image_ns", -1)),
             )}
+        if command == "pause":
+            self._truth.set_paused(bool(message["paused"]))
+            return {"paused": bool(message["paused"])}
+        if command == "hold":
+            with self._condition:
+                if not self._truth.ready:
+                    raise RuntimeError("Gazebo truth not ready for hold")
+                self._position = self._truth.poses["x500_depth_1"]["position"].copy()
+                self._yaw = self._interceptor["yaw"]
+                self._mode = "position"
+                self._look_at_target = False
+                self._scenario.start_ned = self._truth.poses["x500_2"]["position"].tolist()
+                self._scenario_started_ns = None
+                self._reset_separation_position = None
+                self._reset_target_hold = None
+                separation = self._truth.poses["x500_depth_1"]["position"]-self._truth.poses["x500_2"]["position"]
+                if (np.linalg.norm(separation) < 1.5 and
+                    self._truth.contact_count == self._episode_contact_baseline):
+                    target = self._truth.poses["x500_2"]
+                    self._terminal_exit = {"position": target["position"].copy(),
+                                           "velocity": target["velocity"].copy(),
+                                           "timestamp_ns": target["timestamp_ns"]}
+            return {"command": {"mode": "hold"}}
         if command == "reset":
             position = _finite_vector(message.get("position"), 3, "reset position")
             yaw = float(message.get("yaw", 0.0))
@@ -383,6 +550,25 @@ class GazeboRosBridge(Node):
             if not math.isfinite(yaw):
                 raise ValueError("reset yaw must be finite")
             with self._condition:
+                scenario_values = message.get("scenario")
+                if scenario_values is not None:
+                    self._scenario = Scenario(**scenario_values)
+                self._scenario_started_ns = None
+                self._reset_separation_position = None
+                self._reset_target_hold = None
+                self._terminal_exit = None
+                if self._truth.ready:
+                    follower = self._truth.poses["x500_depth_1"]["position"]
+                    leader = self._truth.poses["x500_2"]["position"]
+                    if np.linalg.norm(leader-follower) < 2.0:
+                        away = follower-leader
+                        away[2] = 0.0
+                        norm = np.linalg.norm(away)
+                        if norm < .01:
+                            away = np.array([-1., 0., 0.])
+                            norm = 1.
+                        self._reset_separation_position = follower + 2.5*away/norm
+                        self._reset_target_hold = leader.copy()
                 if look_at_target and self._interceptor is not None and self._target is not None:
                     _, yaw, _ = camera_target_yaw_geometry(
                         self._interceptor["position"], self._target["position"],
@@ -409,10 +595,15 @@ class GazeboRosBridge(Node):
                 yaw_rate_max=float(self.args.yaw_rate_max),
             )
             with self._condition:
+                if self._scenario_started_ns is None:
+                    self._scenario_started_ns = self._truth.poses["x500_2"]["timestamp_ns"]
+                    self._episode_contact_baseline = self._truth.contact_count
                 self._mode = "velocity"
                 self._velocity = decoded.ned_velocity
                 self._yaw_rate = decoded.yaw_rate
                 self._look_at_target = False
+                action_sequence = self._sequence
+                action_time_ns = self._truth.poses["x500_depth_1"]["timestamp_ns"]
             return {"command": {
                 "mode": "velocity",
                 "body_velocity": decoded.body_velocity.tolist(),
@@ -420,6 +611,8 @@ class GazeboRosBridge(Node):
                 "yaw_rate": decoded.yaw_rate,
                 "yaw_used": yaw,
                 "vector_norm_limited": True,
+                "after_sequence": action_sequence,
+                "after_image_ns": action_time_ns + int(1e9/float(self.args.control_rate)),
             }}
         raise ValueError(f"unknown command: {command!r}")
 
@@ -479,13 +672,15 @@ def parse_args():
     parser.add_argument("--reset-yaw", type=float, default=0.0)
     parser.add_argument(
         "--camera-mount-yaw-offset", type=float,
-        default=-math.pi / 2.0,
+        default=0.0,
         help="fixed yaw from PX4 body-forward to the Gazebo camera optical axis",
     )
     parser.add_argument("--velocity-max", type=float, default=8.0)
     parser.add_argument("--yaw-rate-max", type=float, default=1.0)
     parser.add_argument("--control-rate", type=float, default=20.0)
     parser.add_argument("--warmup-setpoints", type=int, default=20)
+    parser.add_argument("--mode", choices=(*MODES, "mixed"), default="mixed")
+    parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args()
 
 

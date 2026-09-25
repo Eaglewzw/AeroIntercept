@@ -58,11 +58,13 @@ class GazeboBridgeClient:
     def ping(self) -> dict:
         return self._call("ping")
 
-    def snapshot(self, after_sequence: int = -1, timeout: float | None = None) -> dict:
+    def snapshot(self, after_sequence: int = -1, timeout: float | None = None,
+                 *, after_image_ns: int = -1) -> dict:
         return self._call(
             "snapshot",
             after_sequence=int(after_sequence),
             timeout=float(self.timeout if timeout is None else timeout),
+            after_image_ns=int(after_image_ns),
         )["snapshot"]
 
     def action(self, values: Iterable[float]) -> dict:
@@ -71,20 +73,27 @@ class GazeboBridgeClient:
             raise ValueError("action must be a finite four-vector")
         return self._call("action", action=action.tolist())["command"]
 
+    def hold(self) -> dict:
+        return self._call("hold")["command"]
+
+    def set_paused(self, paused: bool) -> None:
+        self._call("pause", paused=bool(paused))
+
     def reset(
         self,
         position_ned: Iterable[float],
         yaw: float = 0.0,
         *,
         look_at_target: bool = True,
+        scenario: dict | None = None,
     ) -> dict:
         position = np.asarray(position_ned, dtype=np.float64)
         if position.shape != (3,) or not np.isfinite(position).all():
             raise ValueError("reset position must be a finite NED three-vector")
-        return self._call(
-            "reset", position=position.tolist(), yaw=float(yaw),
-            look_at_target=bool(look_at_target),
-        )["command"]
+        values = dict(position=position.tolist(), yaw=float(yaw), look_at_target=bool(look_at_target))
+        if scenario is not None:
+            values["scenario"] = scenario
+        return self._call("reset", **values)["command"]
 
     def close(self) -> None:
         if self._socket is not None:

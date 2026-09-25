@@ -71,7 +71,16 @@ class EndToEndRuntime:
     def reset(self):
         self._history.clear()
 
-    def step(self, image, yaw: float, *, color_order="RGB") -> RuntimeResult:
+    def step(self, image, yaw: float, *, color_order="RGB", self_state=None,
+             self_state_age_seconds=None) -> RuntimeResult:
+        own_tensor = None
+        if "self_state_input" in self.metadata:
+            own = np.asarray(self_state, dtype=np.float32)
+            if own.shape != (6,) or not np.isfinite(own).all():
+                raise ValueError("runtime requires finite measured PX4 self_state [6]")
+            if self_state_age_seconds is None or not 0 <= self_state_age_seconds <= self.metadata["self_state_input"]["maximum_age_seconds"]:
+                raise ValueError("runtime requires a fresh, causal self-state sample")
+            own_tensor = torch.from_numpy(own[None]).to(self.device)
         frame = self._prepare_frame(image, color_order)
         if not self._history:
             for _ in range(self.history_frames - 1):
@@ -80,7 +89,8 @@ class EndToEndRuntime:
         frames = np.stack(tuple(self._history), axis=0)
         tensor = torch.from_numpy(frames).unsqueeze(0).to(self.device)
         with torch.no_grad():
-            action, future, risk_logit, confidence_logit, attention = self.model(tensor)
+            outputs = self.model(tensor) if own_tensor is None else self.model(tensor, own_tensor)
+            action, future, risk_logit, confidence_logit, attention = outputs
         action_np = action[0].cpu().numpy()
         future_np = future[0].cpu().numpy() * self.future_position_norm
         risk = float(torch.sigmoid(risk_logit[0]))
@@ -124,7 +134,10 @@ class EndToEndRuntime:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         elif color_order.upper() != "RGB":
             raise ValueError("color_order must be 'RGB' or 'BGR'")
-        frame = cv2.resize(
-            frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
         frame = np.clip(frame, 0, 255).astype(np.uint8, copy=False)
+        if self.metadata["input"].get("preprocessing") == "full_frame_letterbox_v1":
+            from ..gazebo.camera import letterbox_rgb
+            frame, _ = letterbox_rgb(frame)
+        else:
+            frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
         return np.ascontiguousarray(frame.transpose(2, 0, 1))

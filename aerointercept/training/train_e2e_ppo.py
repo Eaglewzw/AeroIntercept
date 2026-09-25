@@ -12,12 +12,14 @@ from torch.utils.tensorboard import SummaryWriter
 from ..config import load_config
 from ..end_to_end.environment import VecEndToEndInterceptEnv
 from ..end_to_end.policy import EndToEndActorCritic
+from ..end_to_end.losses import spatial_attention_loss
 
 
 class ImageRolloutBuffer:
     """CPU uint8 image storage plus dense PPO/auxiliary tensors."""
 
-    def __init__(self, steps, environments, frame_shape, critic_dim, action_dim):
+    def __init__(self, steps, environments, frame_shape, critic_dim, action_dim, self_state_dim=0,
+                 camera_supervision=False):
         shape = (steps, environments, *frame_shape)
         self.frames = np.empty(shape, dtype=np.uint8)
         self.privileged = torch.empty(steps, environments, critic_dim)
@@ -32,11 +34,23 @@ class ImageRolloutBuffer:
         self.steps = steps
         self.environments = environments
         self.index = 0
+        self.self_state = torch.empty(steps, environments, self_state_dim) if self_state_dim else None
+        self.camera_target_xy = torch.empty(steps, environments, 2) if camera_supervision else None
+        self.camera_target_valid = torch.empty(steps, environments) if camera_supervision else None
 
     def add(self, frames, training_info, actions, log_probability,
-            rewards, dones, values):
+            rewards, dones, values, self_state=None):
         index = self.index
         self.frames[index] = frames
+        if self.camera_target_xy is not None:
+            if "camera_target_xy" not in training_info or "camera_target_valid" not in training_info:
+                raise ValueError("rollout is missing training-only camera projection labels")
+            self.camera_target_xy[index].copy_(torch.from_numpy(training_info["camera_target_xy"]))
+            self.camera_target_valid[index].copy_(torch.from_numpy(training_info["camera_target_valid"]))
+        if self.self_state is not None:
+            if self_state is None:
+                raise ValueError("rollout is missing measured Actor self-state")
+            self.self_state[index].copy_(torch.from_numpy(self_state))
         self.privileged[index].copy_(torch.from_numpy(
             training_info["critic_obs"]))
         self.actions[index].copy_(actions.detach().cpu())
@@ -101,6 +115,10 @@ def ppo_update(model, optimizer, buffer, cfg, auxiliary_cfg, device):
     risk_target = buffer.collision_risk.reshape(-1)
     confidence_target = buffer.confidence.reshape(-1)
     frames = buffer.frames.reshape(total, *buffer.frames.shape[2:])
+    own_states = None if buffer.self_state is None else buffer.self_state.reshape(total, -1)
+    spatial_coef = float(auxiliary_cfg.get("spatial_coef", 0.))
+    if spatial_coef and buffer.camera_target_xy is None:
+        raise ValueError("spatial PPO supervision requires recorded camera labels")
 
     minibatch_size = max(1, total // int(cfg.num_minibatches))
     indices = np.arange(total)
@@ -109,6 +127,7 @@ def ppo_update(model, optimizer, buffer, cfg, auxiliary_cfg, device):
         "value_loss": 0.0,
         "entropy": 0.0,
         "auxiliary_loss": 0.0,
+        "spatial_loss": 0.0,
         "approx_kl": 0.0,
         "clip_fraction": 0.0,
         "updates": 0,
@@ -131,9 +150,10 @@ def ppo_update(model, optimizer, buffer, cfg, auxiliary_cfg, device):
 
             outputs = model.evaluate_actions(
                 frames_batch, privileged_batch, action_batch,
-                cfg.log_std_min, cfg.log_std_max)
+                cfg.log_std_min, cfg.log_std_max,
+                self_state=None if own_states is None else own_states[selected].to(device))
             (log_probability, entropy, value, future_prediction,
-             risk_logit, confidence_logit, _) = outputs
+             risk_logit, confidence_logit, attention) = outputs
             log_ratio = log_probability - old_log_batch
             ratio = log_ratio.exp()
             unclipped = ratio * advantage_batch
@@ -150,6 +170,12 @@ def ppo_update(model, optimizer, buffer, cfg, auxiliary_cfg, device):
                 confidence_target[selected].to(device),
                 auxiliary_cfg,
             )
+            spatial = aux_loss.new_zeros(())
+            if spatial_coef:
+                spatial = spatial_attention_loss(
+                    attention, buffer.camera_target_xy.reshape(total, 2)[selected].to(device),
+                    buffer.camera_target_valid.reshape(total)[selected].to(device))
+                aux_loss = aux_loss+spatial_coef*spatial
             loss = (
                 policy_loss
                 + cfg.value_coef * value_loss
@@ -171,6 +197,7 @@ def ppo_update(model, optimizer, buffer, cfg, auxiliary_cfg, device):
             metrics["value_loss"] += float(value_loss.detach())
             metrics["entropy"] += float(entropy_mean.detach())
             metrics["auxiliary_loss"] += float(aux_loss.detach())
+            metrics["spatial_loss"] += float(spatial.detach())
             metrics["approx_kl"] += float(approximate_kl)
             metrics["clip_fraction"] += float(clip_fraction)
             metrics["updates"] += 1

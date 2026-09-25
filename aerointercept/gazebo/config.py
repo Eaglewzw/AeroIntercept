@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 from pathlib import Path
 
 import yaml
@@ -38,4 +39,22 @@ def load_gazebo_config(path: str | Path | None = None) -> DotDict:
         raise ValueError("Gazebo actor input must remain 640x640")
     if render.channel_order != "RGB" or int(render.history_frames) != 2:
         raise ValueError("Gazebo observation protocol must be two RGB frames")
+    task = result.gazebo.task
+    model = result.end_to_end.model
+    if int(model.get("self_state_dim", 0)) not in (0, 6):
+        raise ValueError("Actor self-state dimension must be 0 or 6")
+    for key in ("self_velocity_scale", "self_angular_velocity_scale"):
+        if key in model and (not math.isfinite(float(model[key])) or float(model[key]) <= 0):
+            raise ValueError(f"model.{key} must be finite and positive")
+    for key in ("hit_radius", "reset_target_distance_m", "reset_timeout_s"):
+        if not math.isfinite(float(task[key])) or float(task[key]) <= 0:
+            raise ValueError(f"gazebo.task.{key} must be finite and positive")
+    if task.get("task_version") == "noncontact_rendezvous_v1":
+        if task.get("center_reference") != "gazebo_base_link_center_enu_to_ned_v2":
+            raise ValueError("noncontact task requires the corrected base_link center reference")
+        if not task.get("require_contact_monitor"):
+            raise ValueError("noncontact rendezvous requires contact monitoring")
+        for key in ("rendezvous_max_relative_speed_mps", "rendezvous_hold_seconds"):
+            if not math.isfinite(float(task[key])) or float(task[key]) <= 0:
+                raise ValueError(f"gazebo.task.{key} must be finite and positive")
     return result

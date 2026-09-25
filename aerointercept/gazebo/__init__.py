@@ -6,6 +6,10 @@ uses Python 3.12, so :mod:`aerointercept.gazebo.ros_bridge` runs as a small
 system-Python process and exchanges images and state over a local Unix socket.
 """
 
-from .environment import GazeboInterceptEnv, GazeboVectorEnv
+def __getattr__(name):
+    if name in ("GazeboInterceptEnv", "GazeboVectorEnv"):
+        from . import environment
+        return getattr(environment, name)
+    raise AttributeError(name)
 
 __all__ = ["GazeboInterceptEnv", "GazeboVectorEnv"]

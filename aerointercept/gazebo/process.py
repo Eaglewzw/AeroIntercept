@@ -19,7 +19,12 @@ class GazeboStack:
         ]
         if headless:
             command.append("--headless")
+        self.command = command
         self.process = subprocess.Popen(command, start_new_session=True)
+
+    def restart(self) -> None:
+        self.close()
+        self.process = subprocess.Popen(self.command, start_new_session=True)
 
     def close(self) -> None:
         if self.process.poll() is None:

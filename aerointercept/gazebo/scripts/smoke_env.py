@@ -30,6 +30,7 @@ def main():
     try:
         environment = GazeboInterceptEnv(cfg, socket_path)
         frames, training, reset_info = environment.reset()
+        environment.actor_self_state()
         if frames.shape != (2, 3, 640, 640) or frames.dtype != np.uint8:
             raise AssertionError(f"invalid observation {frames.shape} {frames.dtype}")
         if training["critic_obs"].shape != (15,):
@@ -42,6 +43,7 @@ def main():
             # This protocol smoke uses bounded commands, not target truth guidance.
             action = np.array([0.12, 0.0, 0.0, 0.0], dtype=np.float32)
             frames, reward, terminated, truncated, training, info = environment.step(action)
+            environment.actor_self_state()
             rewards.append(reward)
             if terminated or truncated:
                 outcomes.append(info["final"]["outcome"])
@@ -54,6 +56,9 @@ def main():
             "camera_shape": list(frames.shape),
             "camera_dtype": str(frames.dtype),
             "critic_shape": list(training["critic_obs"].shape),
+            "self_state": None if environment.actor_self_state() is None else environment.actor_self_state().tolist(),
+            "self_state_source": snapshot.get("self_state_source"),
+            "self_state_age_seconds": snapshot.get("self_state_age_seconds"),
             "reward_sum": float(np.sum(rewards)),
             "outcomes": outcomes,
             "control_fps": args.steps / elapsed,

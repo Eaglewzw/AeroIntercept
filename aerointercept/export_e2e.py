@@ -25,7 +25,9 @@ def main():
         raise ValueError("checkpoint is not an end-to-end policy")
     model_config = DotDict(checkpoint.get(
         "model_config", dict(cfg.end_to_end.model)))
-    model = EndToEndActorCritic(model_config)
+    construction_config = DotDict(dict(model_config))
+    construction_config["pretrained_weights"] = None
+    model = EndToEndActorCritic(construction_config)
     model.load_state_dict(checkpoint["model"], strict=True)
     actor = model.actor.eval()
     scripted = torch.jit.script(actor)
@@ -48,7 +50,9 @@ def main():
     width = int(render_config["image_width"])
     history = int(model_config.history_frames)
     example = torch.zeros(1, history, 3, height, width, dtype=torch.uint8)
-    outputs = scripted(example)
+    self_state_dim = int(model_config.get("self_state_dim", 0))
+    own_example = torch.zeros(1, self_state_dim) if self_state_dim else None
+    outputs = scripted(example, own_example)
     expected_shapes = ((1, 4), (1, 3), (1,), (1,))
     for output, shape in zip(outputs[:4], expected_shapes):
         if tuple(output.shape) != shape:
@@ -61,7 +65,7 @@ def main():
     digest = hashlib.sha256(output_path.read_bytes()).hexdigest()
     metadata = {
         "phase": 3,
-        "policy_version": "end_to_end_full_frame_v1",
+        "policy_version": "rgb_px4_self_state_v1" if self_state_dim else "end_to_end_full_frame_v1",
         "sha256": digest,
         "input": {
             "name": "frames",
@@ -101,10 +105,22 @@ def main():
         },
         "safety": safety_config,
         "source_checkpoint": str(Path(args.ckpt).resolve()),
+        "task_config": checkpoint.get("task_config"),
+        "model_config": dict(model_config),
         "checkpoint_hit_rate": checkpoint.get("hit_rate"),
         "checkpoint_global_step": checkpoint.get("global_step"),
         "contains_critic": False,
     }
+    if self_state_dim:
+        metadata["self_state_input"] = {
+            "name": "self_state", "shape": ["N", 6], "dtype": "float32",
+            "source": "px4_vehicle_odometry_body_frd_v1", "frame": "body_frd",
+            "components": ["vx", "vy", "vz", "roll_rate", "pitch_rate", "yaw_rate"],
+            "units": ["m/s"]*3+["rad/s"]*3, "maximum_age_seconds": .2,
+            "normalization": "embedded_in_model",
+            "velocity_scale": float(model_config.get("self_velocity_scale", 8.)),
+            "angular_velocity_scale": float(model_config.get("self_angular_velocity_scale", 2.)),
+        }
     metadata_path = output_path.with_name(output_path.stem + "_meta.json")
     with metadata_path.open("w", encoding="utf-8") as stream:
         json.dump(metadata, stream, ensure_ascii=False, indent=2)

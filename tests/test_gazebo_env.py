@@ -8,11 +8,19 @@ import numpy as np
 import pytest
 import torch
 
+from aerointercept.config import DotDict
 from aerointercept.end_to_end.actions import decode_action
-from aerointercept.end_to_end.policy import EndToEndActor
+from aerointercept.end_to_end.policy import EndToEndActor, EndToEndActorCritic
+from aerointercept.end_to_end.optimization import adamw_with_backbone_lr
 from aerointercept.gazebo.camera import decode_ros_image, letterbox_rgb
+from aerointercept.gazebo.checkpoint import load_model_weights
 from aerointercept.gazebo.config import load_gazebo_config
 from aerointercept.gazebo.environment import GazeboInterceptEnv
+from aerointercept.gazebo.expert import GazeboExpertController
+from aerointercept.gazebo.scripts.collect_bc_data import (
+    mode_plan,
+    remaining_mode_plan,
+)
 from aerointercept.gazebo.protocol import image_from_snapshot, receive_packet, send_packet
 from aerointercept.gazebo.task_logic import (
     CRITIC_DIM,
@@ -43,8 +51,7 @@ class FakeBridgeClient:
         self.position = np.asarray(position_ned, dtype=float)
         self.velocity.fill(0.0)
         self.look_at_target = bool(look_at_target)
-        # Default x500_depth camera is -pi/2 from PX4 body-forward.
-        self.yaw = np.pi / 2.0 if look_at_target else float(yaw)
+        self.yaw = 0.0 if look_at_target else float(yaw)
         return {"mode": "position"}
 
     def action(self, values):
@@ -71,6 +78,11 @@ class FakeBridgeClient:
             "interceptor_yaw": self.yaw,
             "target_position": [10.0, 0.0, -6.0],
             "target_velocity": [0.0, 1.0, 0.0],
+            "physical_state_source": "gazebo_base_link_center_enu_to_ned_v2",
+            "contact_monitor_ready": True,
+            "contact_count": 0,
+            "interceptor_timestamp": self.sequence * 50_000,
+            "image_timestamp_ns": self.sequence * 50_000_000,
         }
 
     def close(self):
@@ -85,7 +97,19 @@ def test_gazebo_overlay_preserves_legacy_and_sets_actor_contract():
     assert cfg.end_to_end.render.channel_order == "RGB"
     assert cfg.end_to_end.render.transform == "full_frame_letterbox_v1"
     assert cfg.end_to_end.model.encoder_chunk_size == 4
+    assert cfg.end_to_end.model.encoder_type == "resnet18_multiscale_v1"
+    assert cfg.end_to_end.model.pretrained_weights == "IMAGENET1K_V1"
     assert cfg.gazebo.target.initial_model_separation_m == 10.0
+
+
+def test_true_mixed_collection_splits_fixed_cpp_target_modes():
+    assert mode_plan("mixed", 500) == [
+        ("circle", 167), ("sinusoidal", 167), ("random_walk", 166),
+    ]
+    assert mode_plan("circle", 7) == [("circle", 7)]
+    assert remaining_mode_plan(mode_plan("mixed", 500), 167) == [
+        ("sinusoidal", 167), ("random_walk", 166),
+    ]
 
 
 def test_camera_letterbox_preserves_full_16_by_9_frame():
@@ -157,12 +181,102 @@ def test_environment_reset_uses_two_new_frames_and_actor_gets_only_rgb():
     assert training["future_position"].shape == (3,)
 
 
+def test_reset_rejects_second_frame_that_drifted_outside_distance_tolerance():
+    class DriftingBridge(FakeBridgeClient):
+        def snapshot(self, after_sequence=-1, timeout=None):
+            result = super().snapshot(after_sequence, timeout)
+            if self.sequence == 2:
+                result["target_position"] = [9.78, 0., -6.]
+            return result
+
+    environment = GazeboInterceptEnv(load_gazebo_config(), "/fake", client_factory=DriftingBridge)
+    frames, _, info = environment.reset()
+    assert environment.client.sequence == 4
+    assert frames[:, 0, 0, 0].tolist() == [3, 4]
+    assert info["target_distance_m"] == pytest.approx(10.)
+
+
 def test_actor_has_no_privileged_argument_or_critic_module():
-    actor = EndToEndActor(load_gazebo_config().end_to_end.model).eval()
-    assert tuple(inspect.signature(actor.forward).parameters) == ("frames",)
+    model_cfg = load_gazebo_config().end_to_end.model
+    # Unit tests validate the architecture without requiring network access.
+    model_cfg.pretrained_weights = None
+    actor = EndToEndActor(model_cfg).eval()
+    assert tuple(inspect.signature(actor.forward).parameters) == ("frames", "self_state")
     assert not any(name.startswith("critic") for name, _ in actor.named_modules())
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="self_state"):
         actor(torch.zeros(1, 2, 3, 32, 32, dtype=torch.uint8), torch.zeros(1, 15))
+
+
+def test_experiment_c_multiscale_actor_and_expert_protocol():
+    cfg = load_gazebo_config()
+    model_cfg = cfg.end_to_end.model
+    model_cfg.pretrained_weights = None
+    model_cfg.encoder_chunk_size = 2
+    actor = EndToEndActor(model_cfg).eval()
+    frames = torch.randint(0, 256, (1, 2, 3, 64, 64), dtype=torch.uint8)
+    with torch.no_grad():
+        action, future, risk, confidence, attention = actor(frames, torch.zeros(1, 6))
+    assert action.shape == (1, 4)
+    assert future.shape == (1, 3)
+    assert risk.shape == confidence.shape == (1,)
+    assert attention.shape == (1, 8, 8)
+    assert torch.isfinite(action).all()
+    scripted = torch.jit.script(actor)
+    assert scripted(frames, torch.zeros(1, 6))[0].shape == (1, 4)
+
+    expert = GazeboExpertController(
+        cfg.gazebo.expert, cfg.gazebo.action, cfg.gazebo.camera,
+    )
+    state = {
+        "interceptor_position": [0.0, 0.0, -6.0],
+        "interceptor_velocity": [0.0, 0.0, 0.0],
+        "target_position": [10.0, 0.0, -6.0],
+        "target_velocity": [0.0, 1.0, 0.0],
+        "interceptor_yaw": np.pi / 2.0,
+    }
+    expert_action = expert.action(state)
+    assert expert_action.shape == (4,)
+    assert np.isfinite(expert_action).all()
+    assert np.max(np.abs(expert_action)) <= 1.0
+    command = decode_action(
+        expert_action, state["interceptor_yaw"],
+        velocity_max=cfg.gazebo.action.velocity_max,
+        yaw_rate_max=cfg.gazebo.action.yaw_rate_max,
+    )
+    assert command.north > 0.0
+    assert command.east > 0.0
+
+
+def test_expert_truth_is_copy_only_and_separate_from_actor_observation():
+    cfg = load_gazebo_config()
+    environment = GazeboInterceptEnv(cfg, "/fake", client_factory=FakeBridgeClient)
+    frames, training, _ = environment.reset()
+    state = environment.expert_state()
+    state["target_position"][0] = -999.0
+    second = environment.expert_state()
+    assert second["target_position"][0] == pytest.approx(10.0)
+    assert isinstance(frames, np.ndarray) and frames.shape == (2, 3, 640, 640)
+    assert "critic_obs" in training
+
+
+def test_experiment_c_checkpoint_restore_and_backbone_lr_groups():
+    cfg = load_gazebo_config()
+    recorded_model_config = dict(cfg.end_to_end.model)
+    construction_config = dict(recorded_model_config)
+    construction_config["pretrained_weights"] = None
+    source = EndToEndActorCritic(DotDict(construction_config))
+    optimizer = adamw_with_backbone_lr(
+        source, learning_rate=5.0e-5, backbone_learning_rate=5.0e-6,
+    )
+    assert [group["lr"] for group in optimizer.param_groups] == [5.0e-6, 5.0e-5]
+    checkpoint = {
+        "model": source.state_dict(),
+        "model_config": recorded_model_config,
+    }
+    restored = EndToEndActorCritic(DotDict(construction_config))
+    load_model_weights(restored, checkpoint, recorded_model_config)
+    for expected, actual in zip(source.parameters(), restored.parameters()):
+        assert torch.equal(expected, actual)
 
 
 def test_critic_and_auxiliary_protocol_uses_ned_truth_only_for_training():
@@ -215,6 +329,8 @@ def test_visibility_segment_reward_and_all_termination_paths():
         step_minimum_distance=minimum, lost_count=0,
         interceptor_position=[0, 0, -6], invalid=False,
         episode_step=1, cfg=cfg.gazebo.task,
+        current_distance=.5, relative_speed=.1, held_seconds=.3,
+        contact_monitor_ready=True,
     )
     assert flags["hit"] and flags["terminated"]
     reward, terms = compute_reward(
@@ -224,7 +340,7 @@ def test_visibility_segment_reward_and_all_termination_paths():
     )
     assert set(terms) == {
         "close", "hit", "time", "fov_center", "lost", "smooth",
-        "ground", "invalid", "out_of_bounds", "timeout",
+        "ground", "invalid", "out_of_bounds", "timeout", "contact",
     }
     assert reward > 50.0
 

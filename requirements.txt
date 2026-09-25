@@ -1,6 +1,7 @@
 # 学习制导 + 全端到端训练工程依赖（Python 3.10+）
 # 安装: pip install -r requirements.txt && pip install -e .
 torch>=1.13
+torchvision>=0.14
 numpy>=1.21
 gymnasium>=0.28
 pyyaml>=5.4

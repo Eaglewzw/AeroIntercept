@@ -1,13 +1,16 @@
 """Full-frame Siamese CNN + Transformer interception policy.
 
-Only RGB frames enter the actor.  Future target position, collision risk, and
+The Gazebo Actor uses RGB plus measured own velocity and rates; legacy actors
+use RGB only. Future target position, collision risk, and
 visibility confidence are auxiliary outputs supervised with simulator truth.
 The spatial attention map is exported for runtime inspection and debugging.
 """
-from typing import List
+from typing import List, Optional
+import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .actions import ACTION_DIM
 from .distributions import (
@@ -84,6 +87,90 @@ class SpatialAttentionEncoder(nn.Module):
         return embedding, weights.view(batch, height, width)
 
 
+class ResNet18MultiScaleEncoder(nn.Module):
+    """ImageNet ResNet-18 trunk with stride-8/16 feature fusion.
+
+    The stride-8 map preserves the same 80x80 attention resolution used by the
+    original encoder at 640x640.  A stride-16 semantic map is projected and
+    fused into it, instead of sending thousands of spatial tokens through the
+    temporal Transformer.
+    """
+
+    def __init__(self, embedding_dim: int, fusion_channels: int = 96,
+                 pretrained_weights: str | None = "IMAGENET1K_V1"):
+        super().__init__()
+        try:
+            from torchvision.models import ResNet18_Weights, resnet18
+        except ImportError as error:
+            raise ImportError(
+                "encoder_type=resnet18_multiscale_v1 requires torchvision"
+            ) from error
+
+        weight_name = None if pretrained_weights is None else str(pretrained_weights)
+        if weight_name is None or weight_name.lower() in ("none", "null", "false"):
+            weights = None
+        elif weight_name == "DEFAULT":
+            weights = ResNet18_Weights.DEFAULT
+        elif weight_name == "IMAGENET1K_V1":
+            weights = ResNet18_Weights.IMAGENET1K_V1
+        else:
+            raise ValueError(
+                "pretrained_weights must be null, DEFAULT, or IMAGENET1K_V1"
+            )
+        backbone = resnet18(weights=weights)
+        self.stem = nn.Sequential(
+            backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool,
+        )
+        self.layer1 = backbone.layer1
+        self.layer2 = backbone.layer2
+        self.layer3 = backbone.layer3
+        fusion_channels = int(fusion_channels)
+        self.lateral_stride8 = nn.Conv2d(128, fusion_channels, 1, bias=False)
+        self.lateral_stride16 = nn.Conv2d(256, fusion_channels, 1, bias=False)
+        self.fusion = DepthwiseResidualBlock(
+            fusion_channels, fusion_channels, stride=1,
+        )
+        self.attention = nn.Conv2d(fusion_channels, 1, kernel_size=1)
+        self.projection = nn.Sequential(
+            nn.Linear(fusion_channels, embedding_dim),
+            nn.LayerNorm(embedding_dim),
+            nn.SiLU(inplace=True),
+        )
+
+    def pretrained_backbone_parameters(self):
+        """Return only parameters initialized from ImageNet."""
+        for module in (self.stem, self.layer1, self.layer2, self.layer3):
+            yield from module.parameters()
+
+    def set_pretrained_backbone_trainable(self, trainable: bool) -> None:
+        for parameter in self.pretrained_backbone_parameters():
+            parameter.requires_grad_(trainable)
+
+    def keep_pretrained_batch_norm_eval(self) -> None:
+        for module in (self.stem, self.layer1, self.layer2, self.layer3):
+            for child in module.modules():
+                if isinstance(child, nn.BatchNorm2d):
+                    child.eval()
+
+    def forward(self, images: torch.Tensor):
+        stride4 = self.layer1(self.stem(images))
+        stride8 = self.layer2(stride4)
+        stride16 = self.layer3(stride8)
+        feature_map = self.lateral_stride8(stride8)
+        semantic = self.lateral_stride16(stride16)
+        semantic = F.interpolate(
+            semantic, size=feature_map.shape[-2:], mode="bilinear",
+            align_corners=False,
+        )
+        feature_map = self.fusion(feature_map + semantic)
+        batch, _, height, width = feature_map.shape
+        logits = self.attention(feature_map).flatten(2)
+        weights = torch.softmax(logits, dim=-1)
+        pooled = (feature_map.flatten(2) * weights).sum(dim=-1)
+        embedding = self.projection(pooled)
+        return embedding, weights.view(batch, height, width)
+
+
 class EndToEndActor(nn.Module):
     """Detector-free image actor and its three auxiliary prediction heads."""
 
@@ -94,13 +181,35 @@ class EndToEndActor(nn.Module):
         if self.history_frames < 1 or self.encoder_chunk_size < 1:
             raise ValueError("history_frames and encoder_chunk_size must be positive")
         embedding_dim = int(cfg_model.embedding_dim)
-        self.encoder = SpatialAttentionEncoder(
-            cfg_model.encoder_channels,
-            cfg_model.get(
-                "encoder_strides",
-                [1] + [2] * (len(cfg_model.encoder_channels) - 1)),
-            embedding_dim,
-        )
+        encoder_type = str(cfg_model.get("encoder_type", "custom_v1"))
+        if encoder_type == "custom_v1":
+            self.encoder = SpatialAttentionEncoder(
+                cfg_model.encoder_channels,
+                cfg_model.get(
+                    "encoder_strides",
+                    [1] + [2] * (len(cfg_model.encoder_channels) - 1)),
+                embedding_dim,
+            )
+        elif encoder_type == "resnet18_multiscale_v1":
+            self.encoder = ResNet18MultiScaleEncoder(
+                embedding_dim=embedding_dim,
+                fusion_channels=int(cfg_model.get(
+                    "encoder_multiscale_channels", 96)),
+                pretrained_weights=cfg_model.get(
+                    "pretrained_weights", "IMAGENET1K_V1"),
+            )
+        else:
+            raise ValueError(f"unsupported encoder_type: {encoder_type}")
+        self.spatial_coordinates = bool(cfg_model.get("spatial_coordinates", False))
+        self.visual_yaw_gain = float(cfg_model.get("visual_yaw_gain", 0.0))
+        camera_fov = float(cfg_model.get("camera_horizontal_fov", 1.204))
+        if not math.isfinite(self.visual_yaw_gain) or self.visual_yaw_gain < 0 or not 0 < camera_fov < math.pi:
+            raise ValueError("invalid visual yaw feedback calibration")
+        self.camera_tan_half_fov = math.tan(camera_fov/2)
+        self.spatial_projection = (nn.Linear(4, embedding_dim, bias=False)
+                                   if self.spatial_coordinates else nn.Identity())
+        if self.spatial_coordinates:
+            nn.init.zeros_(self.spatial_projection.weight)
         self.temporal_position = nn.Parameter(torch.zeros(
             1, self.history_frames, embedding_dim))
         layer = nn.TransformerEncoderLayer(
@@ -116,6 +225,21 @@ class EndToEndActor(nn.Module):
             layer, num_layers=int(cfg_model.transformer_layers),
             enable_nested_tensor=False)
         self.output_norm = nn.LayerNorm(embedding_dim)
+        self.self_state_dim = int(cfg_model.get("self_state_dim", 0))
+        if self.self_state_dim not in (0, 6):
+            raise ValueError("self_state_dim must be 0 (legacy) or 6 (PX4 own velocity/rates)")
+        self.self_state_encoder = (nn.Sequential(nn.Linear(6, 64), nn.SiLU(), nn.Linear(64, 64))
+                                   if self.self_state_dim else nn.Identity())
+        self.sensor_fusion = (nn.Linear(embedding_dim+64, embedding_dim)
+                              if self.self_state_dim else nn.Identity())
+        if self.self_state_dim:
+            with torch.no_grad():
+                self.sensor_fusion.weight.zero_()
+                self.sensor_fusion.weight[:, :embedding_dim].copy_(torch.eye(embedding_dim))
+                self.sensor_fusion.bias.zero_()
+        self.register_buffer("self_state_scale", torch.tensor(
+            [float(cfg_model.get("self_velocity_scale", 8.0))]*3
+            + [float(cfg_model.get("self_angular_velocity_scale", 2.0))]*3), persistent=False)
 
         self.action_head = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim),
@@ -144,7 +268,7 @@ class EndToEndActor(nn.Module):
         nn.init.uniform_(self.action_head[-1].weight, -1e-2, 1e-2)
         nn.init.zeros_(self.action_head[-1].bias)
 
-    def _predict(self, frames: torch.Tensor):
+    def _predict(self, frames: torch.Tensor, self_state: Optional[torch.Tensor] = None):
         if frames.dim() != 5:
             raise ValueError("frames must have shape [B,F,3,H,W]")
         batch = frames.size(0)
@@ -158,6 +282,15 @@ class EndToEndActor(nn.Module):
         tokens = tokens + self.temporal_position
         fused_tokens = self.temporal(tokens)
         fused = self.output_norm(fused_tokens[:, -1])
+        if self.self_state_dim:
+            if self_state is None:
+                raise ValueError("this Actor requires PX4 own velocity and angular velocity")
+            if self_state.dim() != 2 or self_state.size(0) != batch or self_state.size(1) != 6:
+                raise ValueError("self_state must have shape [B,6]")
+            if not bool(torch.isfinite(self_state).all()):
+                raise ValueError("self_state contains non-finite sensor values")
+            own_embedding = self.self_state_encoder(self_state.float()/self.self_state_scale)
+            fused = self.sensor_fusion(torch.cat((fused, own_embedding), dim=-1))
 
         latent_action = self.action_head(fused)
         future_position = torch.tanh(self.future_head(fused))
@@ -165,6 +298,13 @@ class EndToEndActor(nn.Module):
         confidence_logit = self.confidence_head(fused).squeeze(-1)
         attention = attention.view(
             batch, history, attention.size(-2), attention.size(-1))[:, -1]
+        if self.visual_yaw_gain:
+            x = (torch.arange(attention.size(-1), device=attention.device, dtype=attention.dtype)+.5)*2/attention.size(-1)-1
+            image_x = (attention*x.view(1, 1, -1)).sum(dim=(-2, -1))
+            # Camera-calibrated yaw feedback from learned RGB attention;
+            # the learned yaw head remains a residual optimized by BC/PPO.
+            feedback = self.visual_yaw_gain*torch.atan(image_x*self.camera_tan_half_fov)
+            latent_action = torch.cat((latent_action[:, :3], (latent_action[:, 3]+feedback).unsqueeze(-1)), dim=-1)
         return (
             latent_action, future_position, collision_logit,
             confidence_logit, attention,
@@ -179,19 +319,31 @@ class EndToEndActor(nn.Module):
             chunk = images[start:start + self.encoder_chunk_size].float()
             chunk = (chunk / 255.0 - self.image_mean) / self.image_std
             embedding, attention = self.encoder(chunk)
+            if self.spatial_coordinates:
+                # Retain absolute image position and spread after feature
+                # pooling. Coordinates are inferred entirely from RGB.
+                h, w = attention.size(-2), attention.size(-1)
+                x = (torch.arange(w, device=attention.device, dtype=attention.dtype)+.5)*2/w-1
+                y = (torch.arange(h, device=attention.device, dtype=attention.dtype)+.5)*2/h-1
+                mx = (attention*x.view(1, 1, w)).sum(dim=(-2, -1))
+                my = (attention*y.view(1, h, 1)).sum(dim=(-2, -1))
+                xx = (attention*x.square().view(1, 1, w)).sum(dim=(-2, -1))
+                yy = (attention*y.square().view(1, h, 1)).sum(dim=(-2, -1))
+                embedding = embedding+self.spatial_projection(torch.stack((mx, my, xx, yy), dim=-1))
             embeddings.append(embedding)
             attentions.append(attention)
         return torch.cat(embeddings, dim=0), torch.cat(attentions, dim=0)
 
-    def forward(self, frames: torch.Tensor):
+    def forward(self, frames: torch.Tensor, self_state: Optional[torch.Tensor] = None):
         """Return action mean, auxiliary predictions, and current attention."""
-        latent, future, risk, confidence, attention = self._predict(frames)
+        latent, future, risk, confidence, attention = self._predict(frames, self_state)
         return torch.tanh(latent), future, risk, confidence, attention
 
     @torch.no_grad()
     def act(self, frames: torch.Tensor, deterministic: bool = False,
-            log_std_min: float = -2.5, log_std_max: float = -0.1):
-        latent, future, risk, confidence, attention = self._predict(frames)
+            log_std_min: float = -2.5, log_std_max: float = -0.1,
+            self_state: Optional[torch.Tensor] = None):
+        latent, future, risk, confidence, attention = self._predict(frames, self_state)
         if deterministic:
             action = torch.tanh(latent)
             log_probability = torch.zeros(
@@ -230,16 +382,16 @@ class EndToEndActorCritic(nn.Module):
 
     @torch.no_grad()
     def act(self, frames, privileged, deterministic=False,
-            log_std_min=-2.5, log_std_max=-0.1):
+            log_std_min=-2.5, log_std_max=-0.1, self_state=None):
         outputs = self.actor.act(
-            frames, deterministic, log_std_min, log_std_max)
+            frames, deterministic, log_std_min, log_std_max, self_state)
         action, log_probability = outputs[0], outputs[1]
         value = self.critic(privileged)
         return (action, log_probability, value, *outputs[2:])
 
     def evaluate_actions(self, frames, privileged, actions,
-                         log_std_min=-2.5, log_std_max=-0.1):
-        latent, future, risk, confidence, attention = self.actor._predict(frames)
+                         log_std_min=-2.5, log_std_max=-0.1, self_state=None):
+        latent, future, risk, confidence, attention = self.actor._predict(frames, self_state)
         log_std = self.actor.log_std.clamp(log_std_min, log_std_max)
         log_probability = squashed_normal_log_probability(
             actions, latent, log_std)

@@ -31,10 +31,49 @@ def load_model_weights(model, checkpoint: dict, model_config: dict) -> None:
         raise RuntimeError(f"strict model restore failed: {result}")
 
 
-def payload(model, optimizer, cfg, global_step, seed, best_hit_rate, metrics):
-    return {
+def validate_task_checkpoint(checkpoint: dict, cfg) -> None:
+    if cfg.gazebo.task.get("task_version") != "noncontact_rendezvous_v1":
+        return
+    task = checkpoint.get("task_config")
+    if task is None:
+        task = checkpoint.get("config", {}).get("gazebo", {}).get("task")
+    if task != dict(cfg.gazebo.task):
+        raise ValueError("checkpoint task differs from the current noncontact center-distance task; train with new data")
+
+
+def load_visual_initialization(model, checkpoint: dict, model_config: dict) -> None:
+    """Explicit migration: preserve learned visual weights, add own-state fusion."""
+    new_keys = {"self_state_dim", "self_velocity_scale", "self_angular_velocity_scale"}
+    stored = checkpoint.get("model_config", {})
+    visual = lambda cfg: {k: v for k, v in architecture_config(cfg).items() if k not in new_keys}
+    if stored.get("self_state_dim", 0) != 0 or model_config.get("self_state_dim") != 6:
+        raise ValueError("visual migration requires a legacy visual Actor and a six-state destination")
+    if visual(stored) != visual(model_config):
+        raise ValueError("visual architecture differs; cannot initialize its weights")
+    result = model.load_state_dict(checkpoint["model"], strict=False)
+    if result.unexpected_keys or any(not key.startswith(("actor.self_state_encoder.", "actor.sensor_fusion."))
+                                     for key in result.missing_keys):
+        raise ValueError(f"unexpected visual migration mismatch: {result}")
+
+
+def load_spatial_initialization(model, checkpoint: dict, model_config: dict) -> None:
+    """Explicit architecture migration with initially zero spatial residual."""
+    stored = checkpoint.get("model_config", {})
+    visual = lambda cfg: {k: v for k, v in architecture_config(cfg).items() if k != "spatial_coordinates"}
+    if stored.get("spatial_coordinates", False) or not model_config.get("spatial_coordinates", False):
+        raise ValueError("spatial migration requires disabled-to-enabled position features")
+    if visual(stored) != visual(model_config):
+        raise ValueError("non-spatial architecture differs")
+    result = model.load_state_dict(checkpoint["model"], strict=False)
+    if result.unexpected_keys or result.missing_keys != ["actor.spatial_projection.weight"]:
+        raise ValueError(f"unexpected spatial migration mismatch: {result}")
+
+
+def payload(model, optimizer, cfg, global_step, seed, best_hit_rate, metrics,
+            lineage=None):
+    result = {
         "phase": 3,
-        "checkpoint_schema": 5,
+        "checkpoint_schema": 6 if cfg.end_to_end.model.get("self_state_dim") else 5,
         "backend": "gazebo_harmonic_px4_sitl",
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -49,6 +88,8 @@ def payload(model, optimizer, cfg, global_step, seed, best_hit_rate, metrics):
         "render_config": dict(cfg.end_to_end.render),
         "action_config": dict(cfg.gazebo.action),
         "label_config": dict(cfg.end_to_end.labels),
+        "task_config": dict(cfg.gazebo.task),
+        "self_state_source": "px4_vehicle_odometry_body_frd_v1" if cfg.end_to_end.model.get("self_state_dim") else None,
         "safety_config": dict(cfg.end_to_end.safety),
         "random_seed": int(seed),
         "image_size": [640, 640],
@@ -67,6 +108,9 @@ def payload(model, optimizer, cfg, global_step, seed, best_hit_rate, metrics):
             "numpy": np.random.get_state(),
         },
     }
+    if lineage is not None:
+        result["lineage"] = dict(lineage)
+    return result
 
 
 def save(path: str | Path, **kwargs) -> None:

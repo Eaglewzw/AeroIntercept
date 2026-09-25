@@ -10,7 +10,14 @@ from .actions import (
     decode_action,
     encode_velocity_command,
 )
-from .environment import EndToEndInterceptEnv, VecEndToEndInterceptEnv
+
+
+def __getattr__(name):
+    # System-Python ROS utilities need NumPy actions, not Gym or PyTorch.
+    if name in ("EndToEndInterceptEnv", "VecEndToEndInterceptEnv"):
+        from . import environment
+        return getattr(environment, name)
+    raise AttributeError(name)
 
 __all__ = [
     "ACTION_DIM",
