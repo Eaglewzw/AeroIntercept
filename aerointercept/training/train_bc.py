@@ -6,7 +6,7 @@
 
 用法:
   python -m aerointercept.training.train_bc --data artifacts/data/bc_dataset.npz \\
-      --out artifacts/runs/legacy_bc/best.pt
+      --out artifacts/runs/training/legacy_bc/best.pt
 """
 import argparse
 import os
@@ -69,7 +69,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None)
     parser.add_argument("--data", default="artifacts/data/bc_dataset.npz")
-    parser.add_argument("--out", default="artifacts/runs/legacy_bc/best.pt")
+    parser.add_argument("--out", default="artifacts/runs/training/legacy_bc/best.pt")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()

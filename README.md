@@ -1,6 +1,6 @@
 # AeroIntercept
 
-### 基于视觉学习的无人机非接触会合仿真平台
+### 面向自主无人机拦截的端到端视觉强化学习与仿真验证平台
 
 <div align="center">
 
@@ -9,92 +9,78 @@
 [![ROS 2](https://img.shields.io/badge/ROS_2-Humble-22314E.svg)](https://docs.ros.org/en/humble/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-BC%20%2F%20PPO-EE4C2C.svg)](https://pytorch.org/)
 
+
 </div>
 
-> AeroIntercept 在 Gazebo 与 PX4 的闭环仿真中训练视觉控制策略。
-> Actor 使用连续两帧机载 RGB 图像和飞控自身速度、角速度，输出三维速度与偏航角速度指令。
+AeroIntercept 面向移动无人机目标的视觉跟踪与近距离非接触会合研究，将机载视觉策略、
+学习算法和 Gazebo/PX4 物理仿真整合为一个可训练、可评估的工程。
+策略直接接收连续 RGB 图像与飞控自身状态，输出三维速度和偏航角速度指令。
 
----
 
-## 项目简介
 
-当前任务从两机中心距约 **10 m** 开始，以机体 `base_link` 惯性中心距 **≤0.5 m**、
-相对速度 **≤0.5 m/s** 持续 **≥0.3 s** 且无接触作为成功条件。目标真值只用于训练监督、
-独立 Critic 和评估，不进入 Actor。训练轨迹包含圆周、正弦和随机游走；
-`figure_eight`、`stop_go` 用于留出场景检查。
+## 核心特点
 
-**当前自主策略尚未通过验收。** 已完成闭环评估的远端 BC 基线为 **0/10**。
-500 轮追加 BC 已启动，离线损失下降尚不能说明闭环成功；最新有据可查的结论见
-[实验记录](assets/docs/EXPERIMENTS.md)。
+- **图像与自身状态融合**：双帧 RGB 提供视觉信息，飞控速度与角速度补充自身运动状态。
+- **端到端控制**：ResNet-18 多尺度编码、空间注意力与 Transformer 共同生成动作，无需独立目标检测器。
+- **学习与仿真闭环**：提供专家数据采集、行为克隆（BC）、非对称 Actor-Critic PPO 和模型导出入口。
+- **多场景验证**：支持圆周、正弦、平滑随机游走、八字及启停运动，区分训练场景与留出场景。
 
-## 仿真画面
+## 效果展示
 
 <div align="center">
-  <img src="assets/docs/figures/gazebo_scene_legacy.png" alt="Gazebo 机载相机历史演示画面" width="78%">
-  <p><i>早期 30 m 配置的机载相机截图，仅展示场景；当前任务与验收使用 10 m 初始中心距。</i></p>
+  <img src="assets/vedio.gif" alt="AeroIntercept 仿真演示" width="900">
 </div>
 
-仿真使用两架 PX4 x500 无人机、机载相机和 Gazebo 公园场景。每回合开始时让拦截机
-朝向目标；策略接管后由自身观测生成控制指令。
 
-## 系统能力
 
-| 组成 | 当前实现 |
-|---|---|
-| 视觉策略 | ResNet-18 多尺度编码、空间注意力、双帧 Transformer 与自身状态融合 |
-| 飞行控制 | PX4 Offboard 三维速度与偏航角速度控制 |
-| 学习方法 | 专家数据行为克隆、非对称 Actor-Critic PPO 与辅助监督 |
-| 目标运动 | `circle`、`sinusoidal`、`random_walk`；留出 `figure_eight`、`stop_go` |
-| 验证环境 | Gazebo/PX4 物理闭环；轻量二维环境用于算法回归 |
+## 模型架构
 
-[查看模型架构图](assets/docs/figures/current_model_architecture.png) ·
-[SVG 矢量版](assets/docs/figures/current_model_architecture.svg)
+![AeroIntercept 模型架构：双帧视觉编码、自身状态融合、动作输出与独立 Critic](assets/docs/figures/current_model_architecture.png)
 
-## 快速开始
+Actor 使用两帧 **640 × 640 RGB** 图像和 **6 维自身状态**（三轴速度、三轴角速度）。
+视觉特征经过双帧 Transformer，与自身状态特征融合后生成控制动作；图像注意力提供偏航反馈，
+辅助预测头用于训练监督。独立 Critic 仅在 PPO 训练中使用，目标真值不进入 Actor。
 
-在工程根目录执行。完整仿真需要 Gazebo Harmonic、PX4 SITL、ROS 2 Humble 和
-`configs/gazebo_feedback.yaml` 中指定的本地依赖。
+[SVG 矢量图](assets/docs/figures/current_model_architecture.svg) ·
+[PDF 论文插图](assets/docs/figures/current_model_architecture.pdf) ·
+[交互式架构图](assets/docs/figures/current_model_architecture.html)
 
-**1. 启动双机仿真**
+## 仿真环境
 
-```bash
-bash aerointercept/gazebo/scripts/launch_gazebo.sh --mode circle --seed 31
-```
+基于 **Gazebo Harmonic + PX4 SITL + ROS 2 Humble**，使用双 x500 无人机、机载相机和公园场景。
+PX4 负责底层飞行控制，策略通过 Offboard 接口发送速度指令。
 
-**2. 查看策略实际接收的相机图像**
+默认任务从约 **10 m** 两机中心距开始，以 **0.5 m** 为会合半径，并检查相对速度、保持时间与接触状态。
+目标采用受限合作运动，用于研究视觉策略的跟踪、接近和泛化能力。项目仍处于研究验证阶段。
 
-另开终端并激活项目的 Python 环境：
+## 快速体验
+
+先按 [使用指南](assets/docs/GUIDE.md) 配置仿真依赖与 Python 环境，并核对
+[主配置](configs/gazebo_feedback.yaml) 中的本机路径。数据和训练权重不随 Git 分发。
+
+在工程根目录激活环境后，使用已有权重启动可视化演示：
 
 ```bash
-source /opt/anaconda3/etc/profile.d/conda.sh
 conda activate AeroIntercept
-python -m aerointercept.gazebo.scripts.view_camera --display
-```
 
-**3. 运行开发评估**
-
-结束手动启动的本项目仿真，再让评估程序启动独立仿真。下面的五模式各 2 回合只用于开发比较：
-
-```bash
 python -m aerointercept.gazebo.scripts.evaluate \
-  --launch --headless --device cuda:0 --suite --episodes 2 --seed 10000 \
+  --launch --device cuda:0 \
   --config configs/gazebo_feedback.yaml \
-  --checkpoint artifacts/runs/remote_20260924/best.pt \
-  --output artifacts/runs/remote_20260924/recheck/evaluation.json --trace
+  --checkpoint artifacts/runs/training/corrective_100_20260925/best.pt \
+  --mode stop_go --episodes 4 --seed 10016 \
+  --output artifacts/runs/experiments/visual_demo/evaluation.json
 ```
 
-## 工程文件
+`--mode` 可切换目标运动类型；添加 `--headless` 可关闭图形界面，按 `Ctrl+C` 停止运行。
 
-| 路径 | 内容 |
+## 工程结构
+
+| 目录 | 内容 |
 |---|---|
-| `aerointercept/` | 模型、Gazebo/PX4 接口、训练与评估代码 |
-| `configs/` | 仿真和模型配置 |
-| `assets/` | 场景、模型、材质、文档与架构图 |
-| `artifacts/data/` | 可复用数据集 |
-| `artifacts/runs/<实验名>/` | 同次实验的权重、日志、评估与导出 |
+| `aerointercept/` | 策略模型、训练算法、仿真接口与评估工具 |
+| `configs/` | 模型、训练与仿真配置 |
+| `assets/` | 场景资源、架构图和项目文档 |
+| `artifacts/data/` | 本地训练数据集 |
+| `artifacts/runs/training/` | 权重、训练日志与离线指标 |
+| `artifacts/runs/experiments/` | 闭环评估报告与轨迹 |
 | `tests/` | 回归测试 |
-
-数据与权重不随 Git 分发。当前数据为 `artifacts/data/noncontact_geometry_corrective/`，
-本地保留模型为 `artifacts/runs/remote_20260924/best.pt`。
-运行参数和服务器任务查看方式见 [使用指南](assets/docs/GUIDE.md)；
-实验结果及正式验收标准见 [实验记录](assets/docs/EXPERIMENTS.md)。

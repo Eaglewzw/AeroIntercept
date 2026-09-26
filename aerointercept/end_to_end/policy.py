@@ -174,6 +174,8 @@ class ResNet18MultiScaleEncoder(nn.Module):
 class EndToEndActor(nn.Module):
     """Detector-free image actor and its three auxiliary prediction heads."""
 
+    __constants__ = ["memory_steps", "has_memory"]
+
     def __init__(self, cfg_model):
         super().__init__()
         self.history_frames = int(cfg_model.history_frames)
@@ -181,6 +183,17 @@ class EndToEndActor(nn.Module):
         if self.history_frames < 1 or self.encoder_chunk_size < 1:
             raise ValueError("history_frames and encoder_chunk_size must be positive")
         embedding_dim = int(cfg_model.embedding_dim)
+        self.memory_steps = int(cfg_model.get("temporal_memory_steps", 0))
+        self.has_memory = self.memory_steps > 0
+        if self.memory_steps and not 2 <= self.memory_steps <= 64:
+            raise ValueError("temporal_memory_steps must be zero or between 2 and 64")
+        self.recurrent = (nn.GRU(embedding_dim, embedding_dim, batch_first=True)
+                          if self.memory_steps else nn.Identity())
+        self.recurrent_projection = (nn.Linear(embedding_dim, embedding_dim, bias=False)
+                                     if self.memory_steps else nn.Identity())
+        if self.memory_steps:
+            nn.init.zeros_(self.recurrent_projection.weight)
+        self.register_buffer("_feature_memory", torch.empty(0, 0, embedding_dim), persistent=False)
         encoder_type = str(cfg_model.get("encoder_type", "custom_v1"))
         if encoder_type == "custom_v1":
             self.encoder = SpatialAttentionEncoder(
@@ -268,7 +281,7 @@ class EndToEndActor(nn.Module):
         nn.init.uniform_(self.action_head[-1].weight, -1e-2, 1e-2)
         nn.init.zeros_(self.action_head[-1].bias)
 
-    def _predict(self, frames: torch.Tensor, self_state: Optional[torch.Tensor] = None):
+    def _features(self, frames: torch.Tensor, self_state: Optional[torch.Tensor] = None):
         if frames.dim() != 5:
             raise ValueError("frames must have shape [B,F,3,H,W]")
         batch = frames.size(0)
@@ -292,12 +305,16 @@ class EndToEndActor(nn.Module):
             own_embedding = self.self_state_encoder(self_state.float()/self.self_state_scale)
             fused = self.sensor_fusion(torch.cat((fused, own_embedding), dim=-1))
 
+        attention = attention.view(
+            batch, history, attention.size(-2), attention.size(-1))[:, -1]
+        return fused, attention
+
+    def _heads(self, fused: torch.Tensor, attention: torch.Tensor):
+
         latent_action = self.action_head(fused)
         future_position = torch.tanh(self.future_head(fused))
         collision_logit = self.risk_head(fused).squeeze(-1)
         confidence_logit = self.confidence_head(fused).squeeze(-1)
-        attention = attention.view(
-            batch, history, attention.size(-2), attention.size(-1))[:, -1]
         if self.visual_yaw_gain:
             x = (torch.arange(attention.size(-1), device=attention.device, dtype=attention.dtype)+.5)*2/attention.size(-1)-1
             image_x = (attention*x.view(1, 1, -1)).sum(dim=(-2, -1))
@@ -309,6 +326,41 @@ class EndToEndActor(nn.Module):
             latent_action, future_position, collision_logit,
             confidence_logit, attention,
         )
+
+    @torch.jit.export
+    def reset_memory(self):
+        self._feature_memory = self._feature_memory[:0, :0]
+
+    def _predict(self, frames: torch.Tensor, self_state: Optional[torch.Tensor] = None):
+        fused, attention = self._features(frames, self_state)
+        if self.has_memory:
+            if self._feature_memory.size(0) != fused.size(0):
+                self._feature_memory = fused.unsqueeze(1)[:, :0]
+            history = torch.cat((self._feature_memory, fused.unsqueeze(1)), dim=1)[:, -self.memory_steps:]
+            memory, _ = self.recurrent(history)
+            self._feature_memory = history.detach()
+            fused = fused+self.recurrent_projection(memory[:, -1])
+        return self._heads(fused, attention)
+
+    @torch.jit.ignore
+    def forward_sequence(self, frames, self_state=None):
+        """Causal BC prefixes; inference uses the same GRU on a rolling window.
+
+        Each cached feature already fuses its own contemporaneous PX4 sample.
+        Cached features are never target truth or recurrent hidden state from
+        another episode. Training batches do not modify the inference cache.
+        """
+        if not self.memory_steps or frames.dim() != 6:
+            raise ValueError("sequence training requires a temporal Actor and [B,S,F,3,H,W]")
+        batch, steps = frames.shape[:2]
+        if steps > self.memory_steps:
+            raise ValueError("BC sequence exceeds the deployed temporal memory window")
+        own = None if self_state is None else self_state.reshape(batch*steps, -1)
+        fused, attention = self._features(frames.reshape(batch*steps, *frames.shape[2:]), own)
+        memory, _ = self.recurrent(fused.reshape(batch, steps, -1))
+        fused = fused+self.recurrent_projection(memory.reshape(batch*steps, -1))
+        latent, future, risk, confidence, attention = self._heads(fused, attention)
+        return torch.tanh(latent), future, risk, confidence, attention
 
     def _encode_images(self, images: torch.Tensor):
         """Normalize and encode in chunks to cap BC/PPO activation memory."""
@@ -391,6 +443,8 @@ class EndToEndActorCritic(nn.Module):
 
     def evaluate_actions(self, frames, privileged, actions,
                          log_std_min=-2.5, log_std_max=-0.1, self_state=None):
+        if self.actor.memory_steps:
+            raise ValueError("temporal PPO needs sequence rollouts; shuffled frame PPO is unsupported")
         latent, future, risk, confidence, attention = self.actor._predict(frames, self_state)
         log_std = self.actor.log_std.clamp(log_std_min, log_std_max)
         log_probability = squashed_normal_log_probability(

@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None)
     parser.add_argument("--ckpt", required=True)
-    parser.add_argument("--out", default="artifacts/runs/e2e_bc/export/policy.pt")
+    parser.add_argument("--out", default="artifacts/runs/training/e2e_bc/export/policy.pt")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -61,11 +61,13 @@ def main():
 
     output_path = Path(args.out)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    scripted.reset_memory()
     scripted.save(str(output_path))
     digest = hashlib.sha256(output_path.read_bytes()).hexdigest()
     metadata = {
         "phase": 3,
-        "policy_version": "rgb_px4_self_state_v1" if self_state_dim else "end_to_end_full_frame_v1",
+        "policy_version": ("rgb_px4_temporal_v1" if model_config.get("temporal_memory_steps", 0)
+                           else "rgb_px4_self_state_v1" if self_state_dim else "end_to_end_full_frame_v1"),
         "sha256": digest,
         "input": {
             "name": "frames",
@@ -107,6 +109,8 @@ def main():
         "source_checkpoint": str(Path(args.ckpt).resolve()),
         "task_config": checkpoint.get("task_config"),
         "model_config": dict(model_config),
+        "temporal_memory": {"steps": int(model_config.get("temporal_memory_steps", 0)),
+                            "reset_method": "reset_memory", "features": "RGB plus contemporaneous PX4 own-state"},
         "checkpoint_hit_rate": checkpoint.get("hit_rate"),
         "checkpoint_global_step": checkpoint.get("global_step"),
         "contains_critic": False,

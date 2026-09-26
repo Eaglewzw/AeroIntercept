@@ -390,8 +390,8 @@ class GazeboInterceptEnv:
         """Return copied simulator truth exclusively for offline label generation.
 
         This method is deliberately separate from both the observation and the
-        Actor API.  PPO/evaluation never call it; the Experiment C dataset
-        collector uses it to query an analytical Gazebo expert.
+        Actor API. The dataset collector and optional evaluation diagnostics
+        use it to query an expert; evaluation never executes that expert action.
         """
         if self._last_snapshot is None:
             raise RuntimeError("reset must be called before requesting expert state")

@@ -5,7 +5,7 @@
   policy_meta.json : 动作解码常数 + 特征版本（policy_runtime 加载时校验）
 
 用法:
-  python -m aerointercept.export --ckpt artifacts/runs/legacy_ppo/best.pt \\
+  python -m aerointercept.export --ckpt artifacts/runs/training/legacy_ppo/best.pt \\
       --out /home/verser/ros2_ws/src/uav_rl_guidance/models/policy.pt
 """
 import argparse
@@ -39,7 +39,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None)
     parser.add_argument("--ckpt", required=True)
-    parser.add_argument("--out", default="artifacts/runs/legacy_ppo/export/policy.pt")
+    parser.add_argument("--out", default="artifacts/runs/training/legacy_ppo/export/policy.pt")
     args = parser.parse_args()
 
     cfg = load_config(args.config)

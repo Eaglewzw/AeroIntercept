@@ -92,6 +92,8 @@ def run_evaluation(policy, cfg, episodes, seed, modes, device,
     for mode_index, mode in enumerate(modes):
         env = EndToEndInterceptEnv(cfg, mode=mode, seed=seed)
         for episode in range(episodes):
+            if not runner.png:
+                runner.actor.reset_memory()
             observation, info = env.reset(
                 seed=seed + mode_index * 100_000 + episode)
             confidences, risks = [], []

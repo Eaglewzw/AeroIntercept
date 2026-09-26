@@ -6,6 +6,7 @@ import argparse
 import json
 import hashlib
 import io
+import math
 from pathlib import Path
 import time
 
@@ -16,6 +17,7 @@ from aerointercept.end_to_end.policy import EndToEndActorCritic
 from aerointercept.gazebo.checkpoint import load_model_weights, validate_task_checkpoint
 from aerointercept.gazebo.config import load_gazebo_config
 from aerointercept.gazebo.environment import GazeboInterceptEnv
+from aerointercept.gazebo.expert import GazeboExpertController
 from aerointercept.gazebo.evaluation_metrics import summarize_episodes, acceptance_result
 from aerointercept.gazebo.process import maybe_launch
 from aerointercept.gazebo.protocol import BridgeProtocolError
@@ -29,7 +31,7 @@ def main():
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--socket", default=None)
-    parser.add_argument("--output", default="artifacts/runs/gazebo_evaluation/evaluation.json")
+    parser.add_argument("--output", default="artifacts/runs/experiments/gazebo_evaluation/evaluation.json")
     parser.add_argument("--launch", action="store_true")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--mode", choices=(*MODES, "mixed"), default="mixed")
@@ -58,6 +60,8 @@ def main():
         construction_config["pretrained_weights"] = None
         model = EndToEndActorCritic(construction_config).to(device).eval()
         load_model_weights(model, checkpoint, dict(cfg.end_to_end.model))
+        diagnostic_expert = (GazeboExpertController(cfg.gazebo.expert, cfg.gazebo.action, cfg.gazebo.camera)
+                             if args.trace else None)
         records = []
         reset_recoveries = []
         retired_camera_frames = 0
@@ -82,17 +86,31 @@ def main():
                 environment.episode_index = old.episode_index
                 frames, _, reset_info = environment.reset()
             episode_reward = 0.0
+            model.actor.reset_memory()
+            if diagnostic_expert is not None:
+                diagnostic_expert.reset()
             for step_index in range(int(cfg.gazebo.task.episode_max_steps)):
+                teacher_action = None
+                input_center_distance = None
+                if diagnostic_expert is not None:
+                    # Diagnostics only: this label is written to the trace and
+                    # never used to modify the visual Actor's command.
+                    diagnostic_state = environment.expert_state()
+                    teacher_action = diagnostic_expert.action(diagnostic_state).tolist()
+                    input_center_distance = math.dist(diagnostic_state["target_position"],
+                                                      diagnostic_state["interceptor_position"])
                 # Deployment path calls Actor directly: no Critic or simulator truth argument.
                 own_state = environment.actor_self_state()
                 input_image_timestamp_ns = environment._last_snapshot.get("image_timestamp_ns")
                 input_camera_relative = environment._last_snapshot.get("camera_relative_frd")
                 own_tensor = None if own_state is None else torch.from_numpy(own_state[None]).to(device)
+                inference_started = time.perf_counter()
                 with torch.no_grad():
                     policy_outputs = model.actor.act(
                         torch.from_numpy(frames[None]).to(device), deterministic=True, self_state=own_tensor
                     )
                     action = policy_outputs[0][0].cpu().numpy()
+                inference_wall_seconds = time.perf_counter()-inference_started
                 predicted_image_xy = None
                 if args.trace:
                     weights = policy_outputs[-1][0].detach().cpu()
@@ -123,6 +141,9 @@ def main():
                             "input_image_timestamp_ns": input_image_timestamp_ns,
                             "input_camera_relative_frd": input_camera_relative,
                             "predicted_image_xy": predicted_image_xy,
+                            "diagnostic_teacher_action": teacher_action,
+                            "input_center_distance_m": input_center_distance,
+                            "inference_wall_seconds": inference_wall_seconds,
                             "result_image_timestamp_ns": snapshot.get("image_timestamp_ns"),
                             "action": action.tolist(), "self_state_input": None if own_state is None else own_state.tolist(),
                             "observed_distance": info.get("distance"), "visible": info.get("visible"),

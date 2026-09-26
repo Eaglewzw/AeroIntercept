@@ -39,7 +39,7 @@ def parse_args():
         help="Experiment C behavior-cloning checkpoint used only for weight initialization",
     )
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--logdir", default="artifacts/runs/gazebo_ppo")
+    parser.add_argument("--logdir", default="artifacts/runs/training/gazebo_ppo")
     parser.add_argument("--mode", choices=(*MODES, "mixed"), default="mixed")
     parser.add_argument("--checkpoint-interval", type=int, default=256)
     parser.add_argument("--encoder-chunk-size", type=int, default=4)
@@ -82,6 +82,8 @@ def main():
         raise ValueError("--resume requires --checkpoint")
 
     cfg = load_gazebo_config(args.config)
+    if cfg.end_to_end.model.get("temporal_memory_steps", 0):
+        raise ValueError("temporal PPO needs sequence rollouts; shuffled frame PPO is unsupported")
     cfg["end_to_end"]["model"]["encoder_chunk_size"] = args.encoder_chunk_size
     cfg["end_to_end"]["ppo"]["num_minibatches"] = max(
         4, int(cfg.end_to_end.ppo.num_minibatches),

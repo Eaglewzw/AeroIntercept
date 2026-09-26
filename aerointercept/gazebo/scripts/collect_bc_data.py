@@ -42,17 +42,23 @@ def parse_args():
     parser.add_argument("--behavior-checkpoint", default=None,
                         help="optional visual policy for corrective imitation data collection")
     parser.add_argument("--expert-weight", type=float, default=.8)
+    parser.add_argument("--blend-schedule", choices=("legacy", "guarded"), default="legacy",
+                        help="guarded allows near-range policy observations with predictive teacher takeover")
     parser.add_argument("--device", default="cuda:0")
     return parser.parse_args()
 
 
-def collect_episode(env, expert, behavior=None, expert_weight=.8):
+def collect_episode(env, expert, behavior=None, expert_weight=.8, blend_schedule="legacy"):
     frames, training, reset_info = env.reset()
     expert.reset()
+    if behavior is not None and hasattr(behavior, "reset_memory"):
+        behavior.reset_memory()
     collected = {
         "frames": [], "actions": [], "future_position": [],
         "collision_risk": [], "confidence": [], "critic_obs": [],
         "camera_target_xy": [],
+        "center_distance_m": [], "executed_actions": [], "teacher_weight": [],
+        "supervision_valid": [],
     }
     use_self_state = int(env.cfg.end_to_end.model.get("self_state_dim", 0)) > 0
     if use_self_state:
@@ -68,18 +74,34 @@ def collect_episode(env, expert, behavior=None, expert_weight=.8):
             collected["self_state_timestamp_ns"].append(env._last_snapshot["self_state_timestamp_ns"])
             collected["image_timestamp_ns"].append(env._last_snapshot["image_timestamp_ns"])
         action = expert.action(state)
+        delta = state["target_position"]-state["interceptor_position"]
+        distance = float(np.linalg.norm(delta))
         # Privileged supervision only: normalized coordinates in the complete
         # letterboxed image. Never returned through the Actor input interface.
         collected["camera_target_xy"].append(camera_target_xy(
             env._last_snapshot["camera_relative_frd"], float(env.cfg.gazebo.camera.horizontal_fov)))
         executed_action = action
+        weight = 1.
         if behavior is not None:
             # Only the collector mixes a privileged teacher and a visual
             # behavior policy. Labels always contain the teacher correction.
             # Fade to the teacher inside 2 m to keep collection noncontact.
-            distance = float(np.linalg.norm(state["target_position"]-state["interceptor_position"]))
             weight = 1. - (1.-expert_weight)*float(np.clip((distance-2.)/3., 0., 1.))
+            if blend_schedule == "guarded":
+                closing = float(np.dot(state["interceptor_velocity"]-state["target_velocity"],
+                                       delta/max(distance, 1e-6)))
+                predicted = distance-max(0., closing)*float(env.cfg.gazebo.expert.braking_lookahead_seconds)
+                # Privileged collection-only takeover; no truth-based fallback
+                # is introduced into the evaluated visual policy.
+                weight = 1. if predicted < .65 or not bool(training["confidence"]) else expert_weight
             executed_action = weight*action + (1.-weight)*behavior(frames, own_state)
+        collected["center_distance_m"].append(distance)
+        collected["executed_actions"].append(executed_action.copy())
+        collected["teacher_weight"].append(weight)
+        collected["supervision_valid"].append(bool(
+            env._last_snapshot.get("contact_monitor_ready")
+            and env._last_snapshot.get("contact_count", 0) == 0
+            and np.isfinite(action).all() and np.isfinite(executed_action).all()))
         collected["frames"].append(frames[-1].copy())
         collected["actions"].append(action.copy())
         for key in (
@@ -103,6 +125,17 @@ def collect_episode(env, expert, behavior=None, expert_weight=.8):
         "critic_obs": np.asarray(collected["critic_obs"], dtype=np.float32),
         "camera_target_xy": np.asarray(collected["camera_target_xy"], dtype=np.float32),
     }
+    for key in ("center_distance_m", "executed_actions", "teacher_weight"):
+        arrays[key] = np.asarray(collected[key], dtype=np.float32)
+    arrays["supervision_valid"] = np.asarray(collected["supervision_valid"], dtype=np.uint8)
+    if final["outcome"] in ("contact", "ground", "invalid", "out_of_bounds"):
+        # Exclude the lead-up to a physical failure, while retaining separately
+        # measured earlier correction fragments. Never relabel a failure hit.
+        timestamps = np.asarray(collected.get("image_timestamp_ns", []), dtype=np.int64)
+        if len(timestamps):
+            arrays["supervision_valid"][timestamps >= timestamps[-1]-1_000_000_000] = 0
+        else:
+            arrays["supervision_valid"][:] = 0
     summary = {
         **final,
         "length": int(arrays["frames"].shape[0]),
@@ -112,6 +145,14 @@ def collect_episode(env, expert, behavior=None, expert_weight=.8):
         "reset_target_distance_m": float(reset_info["target_distance_m"]),
         "scenario": reset_info.get("scenario"),
         "physical_state_source": reset_info.get("physical_state_source"),
+        "valid_supervision_frames": int(arrays["supervision_valid"].sum()),
+        "invisible_frames": int((arrays["confidence"] == 0).sum()),
+        "valid_invisible_frames": int(((arrays["confidence"] == 0) & arrays["supervision_valid"].astype(bool)).sum()),
+        "near_2m_frames": int((arrays["center_distance_m"] < 2.).sum()),
+        "near_2m_policy_frames": int(((arrays["center_distance_m"] < 2.) & (arrays["teacher_weight"] < 1.)).sum()),
+        "valid_near_2m_policy_frames": int(((arrays["center_distance_m"] < 2.) & (arrays["teacher_weight"] < 1.)
+                                           & arrays["supervision_valid"].astype(bool)).sum()),
+        "teacher_takeover_frames": int((arrays["teacher_weight"] == 1.).sum()),
     }
     if use_self_state:
         arrays["self_state"] = np.asarray(collected["self_state"], dtype=np.float32)
@@ -183,6 +224,7 @@ def main():
         "action": dict(cfg.gazebo.action), "camera": dict(cfg.gazebo.camera),
         "labels": dict(cfg.end_to_end.labels),
         "camera_target_label": CAMERA_LABEL_PROTOCOL,
+        "supervision_protocol": "measured_safe_fragments_v1",
     }
     if int(cfg.end_to_end.model.get("self_state_dim", 0)):
         contract["self_state"] = {"source": SELF_STATE_SOURCE, "components": SELF_STATE_COMPONENTS,
@@ -197,7 +239,8 @@ def main():
         checkpoint_bytes = path.read_bytes()
         contract["behavior"] = {
             "checkpoint": str(path.resolve()), "sha256": hashlib.sha256(checkpoint_bytes).hexdigest(),
-            "expert_weight": args.expert_weight, "protocol": "teacher_blend_fade_2m_5m_v1",
+            "expert_weight": args.expert_weight,
+            "protocol": "teacher_blend_fade_2m_5m_v1" if args.blend_schedule == "legacy" else "teacher_blend_predictive_guard_v1",
         }
         checkpoint = torch.load(path, map_location=args.device, weights_only=False)
         validate_task_checkpoint(checkpoint, cfg)
@@ -211,6 +254,7 @@ def main():
             with torch.no_grad():
                 return model.actor.act(torch.from_numpy(frames[None]).to(args.device),
                                        deterministic=True, self_state=own_tensor)[0][0].cpu().numpy()
+        behavior.reset_memory = model.actor.reset_memory
     # JSON round-trip gives tuples the same representation before/after restart.
     contract = json.loads(json.dumps(contract))
     contract_path = output_dir / "collection_config.json"
@@ -249,7 +293,7 @@ def main():
         for selected_mode, mode_episodes in remaining_plan:
             env.mode = selected_mode
             for _ in range(mode_episodes):
-                arrays, summary = collect_episode(env, expert, behavior, args.expert_weight)
+                arrays, summary = collect_episode(env, expert, behavior, args.expert_weight, args.blend_schedule)
                 summary["mode"] = selected_mode
                 final_path = episodes_dir / f"episode_{episode_index:06d}.npz"
                 save_episode(final_path, arrays, summary)

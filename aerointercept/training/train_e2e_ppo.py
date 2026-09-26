@@ -229,8 +229,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None)
     parser.add_argument("--bc-init", default=None)
-    parser.add_argument("--out", default="artifacts/runs/e2e_ppo/best.pt")
-    parser.add_argument("--logdir", default="artifacts/runs/e2e_ppo")
+    parser.add_argument("--out", default="artifacts/runs/training/e2e_ppo/best.pt")
+    parser.add_argument("--logdir", default="artifacts/runs/training/e2e_ppo")
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=0)
@@ -241,6 +241,8 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if cfg.end_to_end.model.get("temporal_memory_steps", 0):
+        raise ValueError("temporal PPO needs sequence rollouts; shuffled frame PPO is unsupported")
     ppo_cfg = cfg.end_to_end.ppo
     num_envs = args.num_envs or ppo_cfg.num_envs
     rollout_steps = args.rollout_steps or ppo_cfg.rollout_steps

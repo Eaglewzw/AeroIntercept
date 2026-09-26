@@ -11,7 +11,8 @@ from aerointercept.end_to_end.actions import (
     decode_action,
     encode_velocity_command,
 )
-from aerointercept.end_to_end.data import EpisodeSequenceDataset
+from aerointercept.end_to_end.data import EpisodeSequenceDataset, split_episode_files
+from aerointercept.end_to_end.bc_metrics import ActionDiagnostics
 from aerointercept.end_to_end.distributions import (
     squashed_normal_log_probability,
     squashed_normal_sample,
@@ -21,7 +22,7 @@ from aerointercept.end_to_end.policy import EndToEndActorCritic
 from aerointercept.end_to_end.renderer import FullFrameRenderer
 from aerointercept.end_to_end.runtime import EndToEndRuntime
 from aerointercept.environments import InterceptEnv
-from aerointercept.training.train_e2e_bc import compute_losses
+from aerointercept.training.train_e2e_bc import compute_losses, run_epoch
 from aerointercept.training.train_e2e_ppo import ImageRolloutBuffer, ppo_update
 
 
@@ -166,6 +167,68 @@ def test_episode_dataset_history_never_crosses_reset(tmp_path):
     first_history = first_second_episode_window["frames"][0]
     assert np.all(first_history[0] == 200)
     assert np.all(first_history[1] == 200)
+
+
+def test_stratified_split_has_every_mode_without_episode_leakage():
+    paths = list(range(24))
+    strata = [mode for mode in ("circle", "sinusoidal", "random_walk") for _ in range(8)]
+    train, validation = split_episode_files(paths, .1, 0, strata=strata)
+    assert len(train) == 21 and len(validation) == 3
+    assert not set(train) & set(validation)
+    assert set(train+validation) == set(paths)
+    assert {strata[index] for index in validation} == set(strata)
+    assert (train, validation) == split_episode_files(paths, .1, 0, strata=strata)
+
+
+def test_split_covers_rare_recovery_episodes_without_losing_modes():
+    paths = list(range(15))
+    modes = [mode for mode in ("circle", "sinusoidal", "random_walk") for _ in range(5)]
+    recovery = [index % 5 == 4 for index in paths]
+    train, validation = split_episode_files(paths, .1, 0, strata=modes, coverage=recovery)
+    assert len(validation) == 3 and not set(train) & set(validation)
+    assert {modes[index] for index in validation} == set(modes)
+    assert {recovery[index] for index in train} == {False, True}
+    assert {recovery[index] for index in validation} == {False, True}
+
+
+def test_fragment_history_and_padding_do_not_cross_invalid_observations(tmp_path):
+    path = tmp_path / "episode_000000.npz"
+    _write_episode(path, 0, length=5)
+    with np.load(path) as shard:
+        arrays = dict(shard)
+    arrays["frames"] = np.broadcast_to(np.arange(5, dtype=np.uint8)[:, None, None, None], (5, 3, 4, 6))
+    arrays["supervision_valid"] = np.asarray([1, 1, 0, 1, 1])
+    np.savez(path, **arrays)
+    dataset = EpisodeSequenceDataset([path], sequence_length=3, history_frames=2)
+    assert len(dataset) == 2
+    assert dataset[1]["frames"][:, :, 0, 0, 0].tolist() == [[3, 3], [3, 4], [3, 4]]
+    assert dataset[1]["mask"].tolist() == [1, 1, 0]
+
+
+def test_action_diagnostics_decode_vector_limit_and_ignore_padding():
+    diagnostics = ActionDiagnostics(8., 1.)
+    diagnostics.update(np.array([[1., 1., 0., .5], [1., 0., 0., 1.]]),
+                       np.zeros((2, 4)), np.array([1., 0.]), np.array([.8, 6.]))
+    report = diagnostics.report()["groups"]
+    assert report["all"]["frames"] == 1
+    assert np.allclose(report["below_1m"]["rmse"], [8./np.sqrt(2), 8./np.sqrt(2), 0., .5])
+    assert report["5m_and_above"]["rmse"] is None
+
+
+def test_validation_loss_weights_frames_instead_of_batches():
+    class ZeroActor(torch.nn.Module):
+        def forward(self, frames, own):
+            count = frames.size(0)
+            return (torch.zeros(count, 4), torch.zeros(count, 3),
+                    torch.zeros(count), torch.zeros(count), torch.ones(count, 2, 2)/4)
+    def batch(length, target):
+        return {"frames": torch.zeros(1, length, 2, 3, 4, 6),
+                "actions": torch.full((1, length, 4), float(target)),
+                "future_position": torch.zeros(1, length, 3),
+                "collision_risk": torch.zeros(1, length),
+                "confidence": torch.ones(1, length), "mask": torch.ones(1, length)}
+    metrics = run_epoch(ZeroActor(), [batch(1, 1), batch(3, 0)], "cpu", load_config().end_to_end.auxiliary)
+    assert metrics["action"] == .25
 
 
 def test_exported_runtime_maintains_frame_history(tmp_path):

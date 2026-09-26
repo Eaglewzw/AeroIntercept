@@ -25,6 +25,8 @@ def main():
     model_cfg = DotDict(dict(ckpt["model_config"]))
     model_cfg["pretrained_weights"] = None
     model = EndToEndActorCritic(model_cfg).to(args.device).eval()
+    if model.actor.memory_steps:
+        raise ValueError("sparse frame audits cannot evaluate temporal memory; use BC sequence diagnostics or closed-loop traces")
     load_model_weights(model, ckpt, dict(ckpt["model_config"]))
     files = ckpt["dataset_split"]["validation"]
     errors, targets, distances = [], [], []

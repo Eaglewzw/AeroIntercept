@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AeroIntercept / 当前模型架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1335,
+      585
+    ],
+    "legend": {
+      "mode": "hidden"
+    }
+  },
+  "components": [
+    {
+      "id": "rgb",
+      "type": "frontend",
+      "label": "双帧 RGB",
+      "sublabel": "2 × 3 × 640 × 640",
+      "pos": [
+        30.0,
+        172.5
+      ],
+      "size": [
+        127.5,
+        61.5
+      ]
+    },
+    {
+      "id": "vision",
+      "type": "backend",
+      "label": "视觉编码",
+      "sublabel": "ResNet-18 · 多尺度注意力",
+      "pos": [
+        217.5,
+        172.5
+      ],
+      "size": [
+        172.5,
+        61.5
+      ]
+    },
+    {
+      "id": "temporal",
+      "type": "backend",
+      "label": "双帧 Transformer",
+      "sublabel": "2 层 · 2 tokens → 128 维",
+      "pos": [
+        450.0,
+        172.5
+      ],
+      "size": [
+        172.5,
+        61.5
+      ]
+    },
+    {
+      "id": "fusion",
+      "type": "backend",
+      "label": "自身状态融合",
+      "sublabel": "拼接 128 + 64 → 128",
+      "pos": [
+        682.5,
+        172.5
+      ],
+      "size": [
+        165.0,
+        61.5
+      ]
+    },
+    {
+      "id": "action",
+      "type": "backend",
+      "label": "动作头",
+      "sublabel": "MLP 128 → 128 → 4",
+      "pos": [
+        907.5,
+        172.5
+      ],
+      "size": [
+        165.0,
+        61.5
+      ]
+    },
+    {
+      "id": "px4",
+      "type": "external",
+      "label": "PX4 飞控",
+      "sublabel": "FRD 速度 + 偏航角速度",
+      "pos": [
+        1132.5,
+        172.5
+      ],
+      "size": [
+        165.0,
+        61.5
+      ]
+    },
+    {
+      "id": "yaw",
+      "type": "backend",
+      "label": "图像偏航反馈",
+      "sublabel": "注意力水平中心 → 偏航增量",
+      "pos": [
+        562.5,
+        45.0
+      ],
+      "size": [
+        217.5,
+        61.5
+      ]
+    },
+    {
+      "id": "own",
+      "type": "frontend",
+      "label": "飞控自身状态",
+      "sublabel": "FRD 三轴速度 + 三轴角速度",
+      "pos": [
+        217.5,
+        330.0
+      ],
+      "size": [
+        172.5,
+        61.5
+      ]
+    },
+    {
+      "id": "state",
+      "type": "backend",
+      "label": "状态编码",
+      "sublabel": "归一化 · MLP 6 → 64 → 64",
+      "pos": [
+        450.0,
+        330.0
+      ],
+      "size": [
+        172.5,
+        61.5
+      ]
+    },
+    {
+      "id": "aux",
+      "type": "backend",
+      "label": "辅助预测头",
+      "sublabel": "未来位置 3D · 风险 · 可见性",
+      "pos": [
+        907.5,
+        330.0
+      ],
+      "size": [
+        217.5,
+        61.5
+      ]
+    },
+    {
+      "id": "critic",
+      "type": "backend",
+      "label": "Critic · 仅 PPO",
+      "sublabel": "仿真状态 15 → 256 → 256 → V(s)",
+      "pos": [
+        450.0,
+        480.0
+      ],
+      "size": [
+        397.5,
+        61.5
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "rgb-vision",
+      "from": "rgb",
+      "to": "vision"
+    },
+    {
+      "id": "vision-temporal",
+      "from": "vision",
+      "to": "temporal"
+    },
+    {
+      "id": "temporal-fusion",
+      "from": "temporal",
+      "to": "fusion"
+    },
+    {
+      "id": "fusion-action",
+      "from": "fusion",
+      "to": "action",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight"
+    },
+    {
+      "id": "action-px4",
+      "from": "action",
+      "to": "px4"
+    },
+    {
+      "id": "vision-yaw",
+      "from": "vision",
+      "to": "yaw"
+    },
+    {
+      "id": "yaw-action",
+      "from": "yaw",
+      "to": "action"
+    },
+    {
+      "id": "own-state",
+      "from": "own",
+      "to": "state"
+    },
+    {
+      "id": "state-fusion",
+      "from": "state",
+      "to": "fusion"
+    },
+    {
+      "id": "fusion-aux",
+      "from": "fusion",
+      "to": "aux"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "当前运行模型",
+      "items": [
+        "100 轮 BC · 最佳 epoch 99；GRU 未启用",
+        "图像历史仅 2 帧；sequence_length=16 是训练分组"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "控制与监督",
+      "items": [
+        "偏航反馈叠加后 tanh；速度缩放、限幅并转换为 NED",
+        "目标真值仅用于监督和评估，不输入 Actor"
+      ]
+    }
+  ]
+}

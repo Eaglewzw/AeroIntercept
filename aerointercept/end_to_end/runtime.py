@@ -67,9 +67,12 @@ class EndToEndRuntime:
         self.device = torch.device(device)
         self.model = torch.jit.load(str(model_path), map_location=self.device).eval()
         self._history = deque(maxlen=self.history_frames)
+        self.reset()
 
     def reset(self):
         self._history.clear()
+        if hasattr(self.model, "reset_memory"):
+            self.model.reset_memory()
 
     def step(self, image, yaw: float, *, color_order="RGB", self_state=None,
              self_state_age_seconds=None) -> RuntimeResult:

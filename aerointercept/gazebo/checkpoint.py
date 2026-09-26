@@ -41,6 +41,21 @@ def validate_task_checkpoint(checkpoint: dict, cfg) -> None:
         raise ValueError("checkpoint task differs from the current noncontact center-distance task; train with new data")
 
 
+def load_temporal_initialization(model, checkpoint: dict, model_config: dict) -> None:
+    """Add an initially zero temporal residual without altering existing heads."""
+    stored = checkpoint.get("model_config", {})
+    base = lambda cfg: {key: value for key, value in architecture_config(cfg).items()
+                        if key != "temporal_memory_steps"}
+    if stored.get("temporal_memory_steps", 0) or not model_config.get("temporal_memory_steps", 0):
+        raise ValueError("temporal migration requires a memory-free source and a temporal destination")
+    if base(stored) != base(model_config):
+        raise ValueError("non-temporal architecture differs")
+    result = model.load_state_dict(checkpoint["model"], strict=False)
+    expected = {key for key in model.state_dict() if key.startswith(("actor.recurrent.", "actor.recurrent_projection."))}
+    if result.unexpected_keys or set(result.missing_keys) != expected:
+        raise ValueError(f"unexpected temporal migration mismatch: {result}")
+
+
 def load_visual_initialization(model, checkpoint: dict, model_config: dict) -> None:
     """Explicit migration: preserve learned visual weights, add own-state fusion."""
     new_keys = {"self_state_dim", "self_velocity_scale", "self_angular_velocity_scale"}
