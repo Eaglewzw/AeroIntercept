@@ -41,10 +41,6 @@ Actor 使用两帧 **640 × 640 RGB** 图像和 **6 维自身状态**（三轴�
 视觉特征经过双帧 Transformer，与自身状态特征融合后生成控制动作；图像注意力提供偏航反馈，
 辅助预测头用于训练监督。独立 Critic 仅在 PPO 训练中使用，目标真值不进入 Actor。
 
-[SVG 矢量图](assets/docs/figures/current_model_architecture.svg) ·
-[PDF 论文插图](assets/docs/figures/current_model_architecture.pdf) ·
-[交互式架构图](assets/docs/figures/current_model_architecture.html)
-
 ## 仿真环境
 
 基于 **Gazebo Harmonic + PX4 SITL + ROS 2 Humble**，使用双 x500 无人机、机载相机和公园场景。
