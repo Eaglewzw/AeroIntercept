@@ -16,7 +16,7 @@ SEED=0
 TARGET_SPAWN_NORTH_M=10.0
 
 usage() {
-  echo "usage: $0 [--headless] [--mode circle|sinusoidal|random_walk|mixed] [--seed N] [--socket PATH]"
+  echo "usage: $0 [--headless] [--mode MODE] [--seed N] [--socket PATH] [--initial-distance METERS]"
 }
 
 while (($#)); do
@@ -25,10 +25,13 @@ while (($#)); do
     --mode) MODE="$2"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
     --socket) SOCKET_PATH="$2"; shift 2 ;;
+    --initial-distance) TARGET_SPAWN_NORTH_M="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+/usr/bin/python3 -c 'import math, sys; d=float(sys.argv[1]); sys.exit(0 if math.isfinite(d) and d > 0 else "initial distance must be finite and positive")' "$TARGET_SPAWN_NORTH_M"
 
 case "$MODE" in
   circle|sinusoidal|random_walk) ;;
@@ -50,6 +53,7 @@ done
 # Refuse a conflicting stack instead of deleting user processes or logs.
 if pgrep -x px4 >/dev/null || pgrep -f "gz sim" >/dev/null || pgrep -x MicroXRCEAgent >/dev/null; then
   echo "an existing PX4/Gazebo/MicroXRCEAgent process is running; stop it explicitly first" >&2
+  echo "If you opened Gazebo to edit the map, save the world and close that window before running evaluate --launch." >&2
   exit 1
 fi
 

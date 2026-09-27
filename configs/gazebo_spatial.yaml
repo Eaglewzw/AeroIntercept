@@ -39,7 +39,7 @@ gazebo:
     velocity_max: 8.0
     yaw_rate_max: 1.0
   expert:
-    controller: cooperative_rendezvous_v1
+    controller: cooperative_rendezvous_v2
     offset_ned:
     - -0.46
     - 0.0
@@ -47,9 +47,6 @@ gazebo:
     position_gain: 1.0
     relative_velocity_gain: 0.6
     target_acceleration_feedforward_seconds: 0.4
-    minimum_horizontal_separation_m: 0.45
-    close_approach_gain: 0.3
-    braking_lookahead_seconds: 0.8
     maximum_relative_speed: 2.0
     yaw_gain: 2.0
     action_smoothing: 0.05
@@ -69,12 +66,9 @@ gazebo:
     target_minimum_altitude: 4.0
     episode_max_steps: 600
     hit_radius: 0.5
-    task_version: noncontact_rendezvous_v1
+    task_version: contact_intercept_v1
     center_reference: gazebo_base_link_center_enu_to_ned_v2
     target_bounding_radius_m: 0.4
-    rendezvous_max_relative_speed_mps: 0.5
-    rendezvous_hold_seconds: 0.3
-    rendezvous_settle_seconds: 1.0
     require_contact_monitor: true
     lost_steps: 30
     ground_height: 0.25

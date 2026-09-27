@@ -2,6 +2,7 @@
 import argparse
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 import time
 
@@ -11,10 +12,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ..config import DotDict, load_config
+from ..gazebo.task_logic import task_contract
 from ..end_to_end.data import (
     EpisodeSequenceDataset,
     episode_files,
     load_manifest,
+    load_episode_split,
     split_episode_files,
 )
 from ..end_to_end.policy import EndToEndActorCritic
@@ -23,6 +26,7 @@ from ..end_to_end.losses import spatial_attention_loss
 from ..end_to_end.optimization import (
     adamw_with_backbone_lr,
     keep_backbone_batch_norm_eval,
+    keep_actor_batch_norm_eval,
     pretrained_backbone_parameters,
     set_backbone_trainable,
 )
@@ -60,6 +64,25 @@ def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (values * mask).sum() / mask.sum().clamp_min(1.0)
 
 
+def action_supervision_weights(batch, auxiliary_cfg):
+    """Weight measured near-target corrections without changing runtime control."""
+    weights = batch["mask"]
+    if auxiliary_cfg.get("visible_action_only", False):
+        weights = weights * batch["confidence"]
+    near_weight = float(auxiliary_cfg.get("near_action_weight", 1.0))
+    radius = float(auxiliary_cfg.get("near_action_radius_m", 2.0))
+    if not math.isfinite(near_weight) or near_weight < 1 or not math.isfinite(radius) or radius <= 0:
+        raise ValueError("near action weight must be finite and at least one; radius must be finite and positive")
+    if near_weight != 1.0:
+        if "center_distance_m" not in batch:
+            raise ValueError("near action weighting requires measured center_distance_m")
+        distance = batch["center_distance_m"].to(weights.device)
+        if distance.shape != weights.shape or not bool(torch.isfinite(distance).all()) or bool((distance < 0).any()):
+            raise ValueError("invalid measured center distances for action weighting")
+        weights = weights * torch.where(distance < radius, near_weight, 1.0)
+    return weights
+
+
 def compute_losses(actor, batch, device, auxiliary_cfg, diagnostics=None) -> Losses:
     frames = batch["frames"].to(device, non_blocking=True)
     actions = batch["actions"].to(device, non_blocking=True)
@@ -88,7 +111,7 @@ def compute_losses(actor, batch, device, auxiliary_cfg, diagnostics=None) -> Los
                                    dtype=action_pred.dtype, device=action_pred.device)
     if axis_weights.shape != (4,) or not bool(torch.isfinite(axis_weights).all()) or bool((axis_weights <= 0).any()):
         raise ValueError("action_axis_weights must contain four finite positive weights")
-    action_mask = mask * confidence_target if auxiliary_cfg.get("visible_action_only", False) else mask
+    action_mask = action_supervision_weights(batch, auxiliary_cfg).to(device)
     action_loss = masked_mean(
         ((action_pred - actions).square()*axis_weights).mean(dim=-1), action_mask)
     if diagnostics is not None:
@@ -124,11 +147,13 @@ def compute_losses(actor, batch, device, auxiliary_cfg, diagnostics=None) -> Los
 
 
 def run_epoch(actor, loader, device, auxiliary_cfg, optimizer=None,
-              keep_batch_norm_eval=False, diagnostics=None):
+              keep_batch_norm_eval=False, diagnostics=None, keep_all_batch_norm_eval=False):
     training = optimizer is not None
     actor.train(training)
     if training and keep_batch_norm_eval:
         keep_backbone_batch_norm_eval(_ActorContainer(actor))
+    if training and keep_all_batch_norm_eval:
+        keep_actor_batch_norm_eval(actor)
     totals = {name: 0.0 for name in Losses.__annotations__}
     counts = {name: 0.0 for name in totals}
     context = torch.enable_grad() if training else torch.no_grad()
@@ -146,7 +171,7 @@ def run_epoch(actor, loader, device, auxiliary_cfg, optimizer=None,
             if float(auxiliary_cfg.get("spatial_coef", 0.)):
                 xy = batch["camera_target_xy"]
                 spatial_count = float((visible*(xy[..., 0].abs() <= 1.)*(xy[..., 1].abs() <= 9./16.)).sum())
-            sizes = {"action": float((visible if auxiliary_cfg.get("visible_action_only", False) else mask).sum()),
+            sizes = {"action": float(action_supervision_weights(batch, auxiliary_cfg).sum()),
                      "future": float(visible.sum()), "risk": float(mask.sum()),
                      "confidence": float(mask.sum()), "spatial": spatial_count}
             for name, count in sizes.items():
@@ -188,6 +213,8 @@ def main():
     parser.add_argument("--selection-metric", choices=("total", "action"), default="total")
     parser.add_argument("--split", choices=("auto", "random", "mode", "mode_visibility"), default="auto",
                         help="hold out complete episodes within each recorded motion mode")
+    parser.add_argument("--split-file", default=None,
+                        help="JSON train/validation filename lists; keeps warm-start replay out of validation")
     parser.add_argument("--visible-action-only", action="store_true",
                         help="use invisible observations for confidence/risk but not truth-only action labels")
     parser.add_argument("--patience", type=int, default=0,
@@ -214,13 +241,15 @@ def main():
     )
     if args.split == "auto":
         args.split = "mode" if use_gazebo else "random"
+    if args.split_file:
+        args.split = "explicit"
     if use_gazebo:
         from ..gazebo.config import load_gazebo_config
         cfg = load_gazebo_config(args.config)
-        if cfg.gazebo.task.get("task_version") == "noncontact_rendezvous_v1":
-            recorded_task = manifest.get("collection_config", {}).get("task")
-            if recorded_task != dict(cfg.gazebo.task):
-                raise ValueError("Gazebo dataset has a different or unrecorded task; collect new noncontact data")
+        recorded_task = manifest.get("collection_config", {}).get("task")
+        if recorded_task is None or task_contract(recorded_task) != task_contract(cfg.gazebo.task):
+            raise ValueError(
+                "Gazebo dataset has a different or unrecorded interception task; collect new data")
     else:
         cfg = load_config(args.config)
     if args.backend == "gazebo" and manifest_backend not in (
@@ -257,7 +286,7 @@ def main():
     # Legacy datasets require whole-episode success. New collections record
     # measured valid fragments, preserving unsuccessful outcomes for audit.
     all_episode_files = episode_files(args.data)
-    if use_gazebo and cfg.gazebo.task.get("task_version") == "noncontact_rendezvous_v1":
+    if use_gazebo:
         summaries = manifest.get("summaries", [])
         by_name = {
             f"episode_{int(item.get('episode', index)):06d}.npz": item
@@ -281,12 +310,15 @@ def main():
                     if int(valid.sum()) != item.get("valid_supervision_frames"):
                         raise ValueError(f"{path}: supervision count differs from collection record")
                     accepted_fragment = bool(valid.any())
-            if accepted_fragment or (not fragments and item is not None and item.get("outcome") == "hit" and item.get("contact_count") == 0):
+            # Without a recorded mask only whole successful episodes are safe to
+            # imitate: an interception hit is the target contact or a pass
+            # inside the radius, while any other contact is recorded separately.
+            if accepted_fragment or (not fragments and item is not None and item.get("outcome") == "hit"):
                 successful.append(path)
             else:
                 excluded.append((path.name, (item or {}).get("outcome", "unknown")))
         if not successful:
-            raise ValueError("Gazebo dataset contains no valid noncontact supervision")
+            raise ValueError("Gazebo dataset contains no valid supervision")
         if excluded:
             print(f"excluding {len(excluded)} failed Gazebo demonstrations from BC: "
                   f"{dict((outcome, sum(1 for _, value in excluded if value == outcome)) for _, outcome in excluded)}")
@@ -313,8 +345,11 @@ def main():
             if manifest.get("collection_config", {}).get("supervision_protocol") != "measured_safe_fragments_v1":
                 raise ValueError("visibility split requires recorded valid invisible-frame counts")
             coverage = [summaries_by_name[path.name]["valid_invisible_frames"] > 0 for path in all_episode_files]
-    train_files, validation_files = split_episode_files(
-        all_episode_files, bc_cfg.val_fraction, args.seed, strata=strata, coverage=coverage)
+    if args.split_file:
+        train_files, validation_files = load_episode_split(all_episode_files, args.split_file)
+    else:
+        train_files, validation_files = split_episode_files(
+            all_episode_files, bc_cfg.val_fraction, args.seed, strata=strata, coverage=coverage)
     train_dataset = EpisodeSequenceDataset(
         train_files, sequence_length, cfg.end_to_end.model.history_frames,
         cache_size=int(bc_cfg.get("cache_episodes", 16)), self_state_dim=self_state_dim,
@@ -387,13 +422,19 @@ def main():
         f"{len(train_dataset)} train windows; backend="
         f"{'gazebo' if use_gazebo else 'legacy'}; "
         f"pretrained_backbone={has_pretrained_backbone}")
-    for epoch in range(1, epochs + 1):
+    # Score the unchanged warm start on this exact validation split first.
+    # Otherwise even a degraded first fine-tuning epoch becomes "best".
+    first_epoch = 0 if any((args.init_checkpoint, args.init_temporal_checkpoint,
+                            args.init_visual_checkpoint, args.init_spatial_checkpoint)) else 1
+    for epoch in range(first_epoch, epochs + 1):
         backbone_trainable = epoch > freeze_epochs
         set_backbone_trainable(model, backbone_trainable)
-        train_metrics = run_epoch(
-            model.actor, train_loader, args.device,
-            cfg.end_to_end.auxiliary, optimizer,
-            keep_batch_norm_eval=keep_batch_norm_eval)
+        if epoch:
+            train_metrics = run_epoch(
+                model.actor, train_loader, args.device,
+                cfg.end_to_end.auxiliary, optimizer,
+                keep_batch_norm_eval=keep_batch_norm_eval,
+                keep_all_batch_norm_eval=bool(bc_cfg.get("keep_all_batch_norm_eval", False)))
         action_cfg = cfg.gazebo.action if use_gazebo else cfg.end_to_end.action
         diagnostics = ActionDiagnostics(action_cfg.velocity_max, action_cfg.yaw_rate_max)
         validation_metrics = run_epoch(
@@ -453,10 +494,15 @@ def main():
                     "weights": cfg.end_to_end.model.get("pretrained_weights"),
                     "backbone_freeze_epochs": freeze_epochs,
                     "backbone_learning_rate": backbone_learning_rate,
+                    "keep_all_batch_norm_eval": bool(bc_cfg.get("keep_all_batch_norm_eval", False)),
                 },
             }, temporary_checkpoint)
             temporary_checkpoint.replace(output)
             saved = " <- saved"
+        if epoch == 0:
+            print(f"initial checkpoint baseline val={validation_metrics['total']:.4f} "
+                  f"action={validation_metrics['action']:.6f}{saved}", flush=True)
+            continue
         print(
             f"epoch {epoch:3d}/{epochs} "
             f"train={train_metrics['total']:.4f} "

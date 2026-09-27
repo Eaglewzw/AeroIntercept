@@ -11,6 +11,8 @@ import tempfile
 
 import numpy as np
 
+from aerointercept.gazebo.task_logic import task_contract
+
 
 SUMMARY_KEY = "episode_summary_json"
 
@@ -39,8 +41,15 @@ def merge_collections(sources, output: Path) -> dict:
     for manifest in manifests:
         if any(manifest.get(key) != first.get(key) for key in required_manifest):
             raise ValueError("incompatible observation/action contracts")
-        if any(manifest["collection_config"].get(key) != common[key] for key in required_contract):
+        # Compare the interception contract, so collections recorded before the
+        # contact-intercept migration still merge with new ones.
+        if any(
+            key != "task" and manifest["collection_config"].get(key) != common[key]
+            for key in required_contract
+        ):
             raise ValueError("incompatible collection contracts")
+        if task_contract(manifest["collection_config"].get("task", {})) != task_contract(common["task"]):
+            raise ValueError("incompatible collection tasks")
     merged = copy.deepcopy(first)
     merged.update(seed=None, mode="mixed", summaries=[], source_manifests=manifests)
     merged["collection_config"] = common

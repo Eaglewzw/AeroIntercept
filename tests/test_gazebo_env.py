@@ -15,7 +15,7 @@ from aerointercept.end_to_end.optimization import adamw_with_backbone_lr
 from aerointercept.gazebo.camera import decode_ros_image, letterbox_rgb
 from aerointercept.gazebo.checkpoint import load_model_weights
 from aerointercept.gazebo.config import load_gazebo_config
-from aerointercept.gazebo.environment import GazeboInterceptEnv
+from aerointercept.gazebo.environment import GazeboInterceptEnv, requires_world_replacement
 from aerointercept.gazebo.expert import GazeboExpertController
 from aerointercept.gazebo.scripts.collect_bc_data import (
     mode_plan,
@@ -329,8 +329,6 @@ def test_visibility_segment_reward_and_all_termination_paths():
         step_minimum_distance=minimum, lost_count=0,
         interceptor_position=[0, 0, -6], invalid=False,
         episode_step=1, cfg=cfg.gazebo.task,
-        current_distance=.5, relative_speed=.1, held_seconds=.3,
-        contact_monitor_ready=True,
     )
     assert flags["hit"] and flags["terminated"]
     reward, terms = compute_reward(
@@ -343,6 +341,21 @@ def test_visibility_segment_reward_and_all_termination_paths():
         "ground", "invalid", "out_of_bounds", "timeout", "contact",
     }
     assert reward > 50.0
+
+
+@pytest.mark.parametrize("final,replace", [
+    ({"outcome": "hit", "contact_count": 0}, False),
+    ({"outcome": "hit", "contact_count": 1}, True),
+    ({"outcome": "hit", "contact_count": None}, False),
+    ({"outcome": "timeout", "contact_count": 3}, True),
+    ({"outcome": "contact", "contact_count": 1}, True),
+    ({"outcome": "ground", "contact_count": 0}, True),
+    ({"outcome": "invalid", "contact_count": 0}, True),
+    ({"outcome": "fov_lost", "contact_count": 0}, False),
+])
+def test_a_touched_episode_needs_a_fresh_world_even_when_it_succeeded(final, replace):
+    """A successful interception usually ends in a physical contact."""
+    assert requires_world_replacement(final) is replace
 
 
 @pytest.mark.parametrize(

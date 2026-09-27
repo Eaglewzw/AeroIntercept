@@ -92,7 +92,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config', default='configs/gazebo_feedback.yaml')
     p.add_argument('--checkpoint', required=True)
-    p.add_argument('--data', default='artifacts/data/noncontact_geometry_corrective')
+    p.add_argument('--data', default='artifacts/data/gazebo_corrective_v2_20260927')
     p.add_argument('--output', required=True)
     p.add_argument('--batch-sizes', nargs='+', type=int, default=[2, 4, 8])
     p.add_argument('--chunk-sizes', nargs='+', type=int, default=[4, 16])

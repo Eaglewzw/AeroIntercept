@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from aerointercept.config import DEFAULT_CONFIG, DotDict
+from aerointercept.gazebo.task_logic import TASK_VERSION
 
 
 DEFAULT_GAZEBO_CONFIG = (
@@ -49,12 +50,13 @@ def load_gazebo_config(path: str | Path | None = None) -> DotDict:
     for key in ("hit_radius", "reset_target_distance_m", "reset_timeout_s"):
         if not math.isfinite(float(task[key])) or float(task[key]) <= 0:
             raise ValueError(f"gazebo.task.{key} must be finite and positive")
-    if task.get("task_version") == "noncontact_rendezvous_v1":
-        if task.get("center_reference") != "gazebo_base_link_center_enu_to_ned_v2":
-            raise ValueError("noncontact task requires the corrected base_link center reference")
-        if not task.get("require_contact_monitor"):
-            raise ValueError("noncontact rendezvous requires contact monitoring")
-        for key in ("rendezvous_max_relative_speed_mps", "rendezvous_hold_seconds"):
-            if not math.isfinite(float(task[key])) or float(task[key]) <= 0:
-                raise ValueError(f"gazebo.task.{key} must be finite and positive")
+    if task.get("task_version") != TASK_VERSION:
+        raise ValueError(
+            f"gazebo.task.task_version must be {TASK_VERSION!r}; "
+            "the noncontact rendezvous task is retired"
+        )
+    if task.get("center_reference") != "gazebo_base_link_center_enu_to_ned_v2":
+        raise ValueError("the hit radius is measured on the corrected base_link center reference")
+    if not task.get("require_contact_monitor"):
+        raise ValueError("contact interception requires a verified contact monitor")
     return result

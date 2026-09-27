@@ -22,7 +22,6 @@ from .task_logic import (
     camera_target_yaw_geometry,
     target_visibility,
     termination_flags,
-    vertical_clearance_penalty,
 )
 
 
@@ -68,7 +67,6 @@ class GazeboInterceptEnv:
         self.mode = mode or status.get("default_mode", "mixed")
         self.seed = int(status.get("default_seed", 0) if seed is None else seed)
         self.episode_index = 0
-        self._hold_started_ns = None
         self._history = np.empty(self.observation_shape, dtype=np.uint8)
         self._last_snapshot: dict | None = None
         self._last_action = np.zeros(4, dtype=np.float32)
@@ -205,11 +203,11 @@ class GazeboInterceptEnv:
         second_snapshot = snapshot
         second, training, metrics = self._observation_and_training(second_snapshot)
         if bool(self.task_cfg.get("require_contact_monitor", False)) and not second_snapshot.get("contact_monitor_ready"):
-            raise BridgeProtocolError("noncontact task requires a verified Gazebo contact monitor")
-        if self.task_cfg.get("task_version") == "noncontact_rendezvous_v1" and second_snapshot.get(
-            "physical_state_source"
-        ) != "gazebo_base_link_center_enu_to_ned_v2":
-            raise BridgeProtocolError("noncontact task requires Gazebo base_link center truth")
+            raise BridgeProtocolError("interception requires a verified Gazebo contact monitor")
+        if second_snapshot.get("physical_state_source") != "gazebo_base_link_center_enu_to_ned_v2":
+            # The hit radius is measured between base_link centers; a bridge
+            # regression would silently move the success boundary.
+            raise BridgeProtocolError("interception requires Gazebo base_link center truth")
         self._history[0] = first
         self._history[1] = second
         self._last_snapshot = second_snapshot
@@ -219,7 +217,6 @@ class GazeboInterceptEnv:
         self._episode = EpisodeStats(minimum_distance=metrics["distance"])
         self._episode_started_wall = time.monotonic()
         self._episode_started_image_ns = second_snapshot.get("image_timestamp_ns")
-        self._hold_started_ns = None
         self.episode_index += 1
         return self._history.copy(), training, {
             "camera": second_snapshot.get("camera_metadata", {}),
@@ -274,15 +271,10 @@ class GazeboInterceptEnv:
             np.asarray(state["target_velocity"])-state["interceptor_velocity"]
         ))
         contact = int(snapshot.get("contact_count", 0)) > 0
-        timestamp_ns = int(snapshot.get("interceptor_timestamp", 0))*1000
-        eligible = (metrics["distance"] <= float(self.task_cfg.hit_radius)
-                    and relative_speed <= float(self.task_cfg.get("rendezvous_max_relative_speed_mps", .5))
-                    and not contact and finite)
-        if eligible and self._hold_started_ns is None:
-            self._hold_started_ns = timestamp_ns
-        if not eligible:
-            self._hold_started_ns = None
-        held_seconds = 0.0 if self._hold_started_ns is None else (timestamp_ns-self._hold_started_ns)*1e-9
+        pair = snapshot.get("last_contact") or []
+        target_contact = contact and len(pair) == 2 and (
+            ("x500_depth_1" in pair[0] and "x500_2" in pair[1])
+            or ("x500_2" in pair[0] and "x500_depth_1" in pair[1]))
         flags = termination_flags(
             step_minimum_distance=minimum,
             lost_count=self._lost_count,
@@ -290,46 +282,8 @@ class GazeboInterceptEnv:
             invalid=not finite,
             episode_step=self._episode.length,
             cfg=self.task_cfg,
-            current_distance=metrics["distance"], relative_speed=relative_speed,
-            held_seconds=held_seconds, contact=contact,
-            contact_monitor_ready=bool(snapshot.get("contact_monitor_ready", False)),
+            contact=contact, target_contact=target_contact,
         )
-        settle_seconds = float(self.task_cfg.get("rendezvous_settle_seconds", 0.0))
-        trigger_distance = metrics["distance"] if flags["hit"] else None
-        trigger_relative_speed = relative_speed if flags["hit"] else None
-        if flags["hit"] and self._scenario_control and settle_seconds > 0:
-            # Verify the terminal braking maneuver too. A delayed contact cannot
-            # turn a physical failure into a recorded successful demonstration.
-            self.client.hold()
-            deadline = time.monotonic() + 10.0
-            settle_start_ns = int(snapshot["interceptor_timestamp"])*1000
-            while time.monotonic() < deadline:
-                snapshot = self.client.snapshot(int(snapshot["sequence"]), timeout=3.)
-                state = self._physical_state(snapshot)
-                image, training, metrics = self._observation_and_training(snapshot)
-                contact = int(snapshot.get("contact_count", 0)) > 0
-                relative_speed = float(np.linalg.norm(
-                    np.asarray(state["target_velocity"])-state["interceptor_velocity"]
-                ))
-                self._episode.minimum_distance = min(self._episode.minimum_distance, metrics["distance"])
-                elapsed = (int(snapshot["interceptor_timestamp"])*1000-settle_start_ns)*1e-9
-                exit_flags = termination_flags(
-                    step_minimum_distance=metrics["distance"], lost_count=0,
-                    interceptor_position=state["interceptor_position"],
-                    invalid=not all(np.isfinite(np.asarray(value)).all() for value in state.values()),
-                    episode_step=0, cfg=self.task_cfg, contact=contact,
-                    contact_monitor_ready=bool(snapshot.get("contact_monitor_ready", False)),
-                )
-                physical_failures = ("contact", "ground", "invalid", "out_of_bounds")
-                if any(exit_flags[key] for key in physical_failures):
-                    flags["hit"] = False
-                    for key in physical_failures:
-                        flags[key] = exit_flags[key]
-                    break
-                if elapsed >= settle_seconds and snapshot.get("hold_complete", False):
-                    break
-            else:
-                raise TimeoutError("no simulator progress during terminal noncontact verification")
         reward, reward_terms = compute_reward(
             previous_distance=self._previous_distance,
             distance=metrics["distance"],
@@ -340,12 +294,6 @@ class GazeboInterceptEnv:
             flags=flags,
             cfg=self.reward_cfg,
         )
-        if self.task_cfg.get("task_version") == "noncontact_rendezvous_v1":
-            reward_terms["relative_speed"] = -.2*relative_speed**2 if metrics["distance"] < 2. else 0.
-            reward += reward_terms["relative_speed"]
-            reward_terms["vertical_clearance"] = vertical_clearance_penalty(
-                np.asarray(state["target_position"])-np.asarray(state["interceptor_position"]), self.reward_cfg)
-            reward += reward_terms["vertical_clearance"]
         self._episode.reward += reward
         self._history[0] = self._history[1]
         self._history[1] = image
@@ -360,7 +308,6 @@ class GazeboInterceptEnv:
             "termination": flags,
             "decoded_action": decoded,
             "relative_speed": relative_speed,
-            "rendezvous_held_seconds": held_seconds,
         }
         if terminated or truncated:
             outcome_order = ("invalid", "contact", "ground", "out_of_bounds", "fov_lost", "hit")
@@ -371,12 +318,14 @@ class GazeboInterceptEnv:
                 "episode_length": self._episode.length,
                 "minimum_distance": self._episode.minimum_distance,
                 "final_center_distance_m": metrics["distance"],
-                "rendezvous_center_distance_m": trigger_distance,
-                "rendezvous_relative_speed_mps": trigger_relative_speed,
                 "final_relative_speed_mps": relative_speed,
-                "rendezvous_held_seconds": held_seconds,
+                "target_contact": bool(target_contact),
                 "contact_count": int(snapshot.get("contact_count", 0)),
                 "last_contact": snapshot.get("last_contact") if contact else None,
+                # Contacts of the target alone are recorded, never charged to
+                # the interceptor as a collision.
+                "target_scenery_contact_count": int(snapshot.get("target_scenery_contact_count", 0)),
+                "last_target_scenery_contact": snapshot.get("last_target_scenery_contact"),
                 "episode_wall_seconds": time.monotonic() - self._episode_started_wall,
                 "episode_simulation_seconds": image_elapsed_seconds(
                     self._episode_started_image_ns, snapshot.get("image_timestamp_ns"),
@@ -429,6 +378,19 @@ def image_elapsed_seconds(start_ns: int | None, end_ns: int | None) -> float | N
     return (end_ns - start_ns) / 1_000_000_000.0
 
 
+def requires_world_replacement(final: dict) -> bool:
+    """Judge whether the next episode would start from a broken simulator.
+
+    A physical contact leaves PX4 and Gazebo crashed or entangled, and an
+    interception usually ends in exactly that contact, so the outcome name
+    alone understates which episodes need a fresh world.
+    """
+    return bool(
+        final.get("outcome") in ("contact", "ground", "invalid")
+        or int(final.get("contact_count") or 0) > 0
+    )
+
+
 class GazeboVectorEnv:
     """Vector façade over independently launched Gazebo/PX4 worlds.
 
@@ -469,7 +431,7 @@ class GazeboVectorEnv:
         # Preserve final episode data, then physically return completed PX4 vehicles home.
         for index in np.flatnonzero(dones):
             final = infos[index].get("final")
-            if final and final["outcome"] in ("contact", "ground", "invalid") and self._restart_world is not None:
+            if final and requires_world_replacement(final) and self._restart_world is not None:
                 self._replace_world(index)
             try:
                 reset_frame, reset_training, reset_info = self.environments[index].reset()

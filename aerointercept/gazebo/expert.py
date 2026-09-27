@@ -9,7 +9,7 @@ from aerointercept.gazebo.task_logic import camera_target_yaw_geometry
 
 
 class GazeboExpertController:
-    """Cooperative formation-following expert for noncontact behavior cloning.
+    """Cooperative formation-following expert for behavior cloning.
 
     The controller consumes simulator truth and therefore must never be used as
     an Actor input or deployment fallback.  Its output follows the exact same
@@ -49,7 +49,7 @@ class GazeboExpertController:
         if not np.isfinite(values).all():
             raise ValueError("Gazebo expert state contains NaN or Inf")
 
-        if self.cfg.get("controller") != "cooperative_rendezvous_v1":
+        if self.cfg.get("controller") != "cooperative_rendezvous_v2":
             raise ValueError("the Gazebo expert requires the cooperative rendezvous configuration")
         desired = target_position + np.asarray(self.cfg.offset_ned, dtype=np.float64)
         relative_velocity = np.asarray(state["interceptor_velocity"])-target_velocity
@@ -67,19 +67,6 @@ class GazeboExpertController:
                 velocity_ned += float(self.cfg.target_acceleration_feedforward_seconds)*self._target_acceleration
         self._previous_target_velocity = target_velocity.copy()
         self._previous_timestamp = None if timestamp is None else float(timestamp)
-        horizontal = (target_position-interceptor_position)[:2]
-        separation = float(np.linalg.norm(horizontal))
-        if separation > 1e-6:
-            direction = horizontal/separation
-            actual_closing = float(np.dot(relative_velocity[:2], direction))
-            predicted = separation-max(0., actual_closing)*float(self.cfg.braking_lookahead_seconds)
-            limit = float(self.cfg.close_approach_gain)*(predicted-float(self.cfg.minimum_horizontal_separation_m))
-            # Establish the vertical offset before the close formation approach.
-            if separation < 2. and abs(float(desired[2]-interceptor_position[2])) > .04:
-                limit = min(limit, 0.)
-            requested = float(np.dot((velocity_ned-target_velocity)[:2], direction))
-            if requested > limit:
-                velocity_ned[:2] -= (requested-limit)*direction
         _, _, yaw_error = camera_target_yaw_geometry(
             interceptor_position, target_position, yaw,
             float(self.camera_cfg.mount_yaw_offset_rad),
@@ -106,4 +93,4 @@ class GazeboExpertController:
 
 
 def expert_name() -> str:
-    return "gazebo_cooperative_rendezvous_v1"
+    return "gazebo_cooperative_rendezvous_v2"

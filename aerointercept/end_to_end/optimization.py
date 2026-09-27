@@ -54,3 +54,16 @@ def keep_backbone_batch_norm_eval(model) -> None:
     )
     if setter is not None:
         setter()
+
+
+def keep_actor_batch_norm_eval(actor) -> None:
+    """Keep deployed normalization during small corrective-data fine-tuning.
+
+    Sequential image chunks contain strongly correlated frames. Updating their
+    running statistics on a small corrective dataset can change the deployed
+    policy even when the corresponding weights are frozen. Affine parameters
+    remain trainable; dropout and other training modules are unaffected.
+    """
+    for module in actor.modules():
+        if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+            module.eval()

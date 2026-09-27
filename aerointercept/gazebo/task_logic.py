@@ -16,6 +16,32 @@ from aerointercept.end_to_end.actions import ned_to_body
 
 CRITIC_DIM = 15
 
+TASK_VERSION = "contact_intercept_v1"
+
+# The noncontact rendezvous task is retired: relative speed, hold time and the
+# post-success stability verification are no longer success conditions.  Those
+# keys survive in datasets and checkpoints recorded before the migration, so
+# they are ignored when comparing task contracts and existing data and weights
+# remain usable.
+RETIRED_TASK_KEYS = (
+    "rendezvous_max_relative_speed_mps",
+    "rendezvous_hold_seconds",
+    "rendezvous_settle_seconds",
+)
+
+
+def task_contract(task) -> dict:
+    """Return the semantic interception contract, without the version label.
+
+    Every remaining field changes what an episode means and must match; the
+    retired keys and ``task_version`` are labels of how a recording was
+    produced, not of the task being solved.
+    """
+    return {
+        key: value for key, value in dict(task).items()
+        if key not in (*RETIRED_TASK_KEYS, "task_version")
+    }
+
 
 def wrap_yaw(angle: float) -> float:
     """Wrap one NED yaw angle to ``[-pi, pi)``."""
@@ -154,59 +180,40 @@ def termination_flags(
     invalid: bool,
     episode_step: int,
     cfg,
-    current_distance: float | None = None,
-    relative_speed: float | None = None,
-    held_seconds: float = 0.0,
     contact: bool = False,
-    contact_monitor_ready: bool = False,
+    target_contact: bool = False,
 ) -> dict[str, bool]:
+    """Judge one step of the contact-intercept task.
+
+    Success is a physical contact with the target, or a pass whose minimum
+    center distance is within ``hit_radius``.  Contact with anything else, the
+    ground, an invalid state, leaving the scene or losing the target from the
+    camera stays a failure that success never overrides.
+    """
     position = np.asarray(interceptor_position, dtype=np.float64)
     altitude = -float(position[2]) if np.isfinite(position[2]) else -math.inf
     result = {
-        "hit": step_minimum_distance <= float(cfg.hit_radius),
+        "hit": bool(target_contact or 0 <= step_minimum_distance <= float(cfg.hit_radius)),
         "fov_lost": lost_count >= int(cfg.lost_steps),
         "ground": altitude <= float(cfg.ground_height),
         "invalid": bool(invalid),
-        "contact": bool(contact),
+        "contact": bool(contact and not target_contact),
         "out_of_bounds": bool(
             np.linalg.norm(position[:2]) > float(cfg.scene_boundary)
             or altitude > float(cfg.maximum_altitude)
         ),
         "timed_out": episode_step >= int(cfg.episode_max_steps),
     }
-    if cfg.get("task_version") == "noncontact_rendezvous_v1":
-        result["invalid"] |= not contact_monitor_ready
-        result["hit"] = bool(
-            current_distance is not None and 0.0 <= current_distance <= float(cfg.hit_radius)
-            and relative_speed is not None and 0.0 <= relative_speed <= float(cfg.rendezvous_max_relative_speed_mps)
-            and held_seconds >= float(cfg.rendezvous_hold_seconds)
-        )
+    if result["hit"]:
+        # The terminal frames of an intercept fill or leave the image; that is
+        # not a camera failure.
+        result["fov_lost"] = False
     # A distance event never overrides a physical failure.
     result["hit"] &= not any(result[key] for key in ("invalid", "contact", "ground", "out_of_bounds", "fov_lost"))
     result["terminated"] = any(
         result[name] for name in ("hit", "fov_lost", "ground", "invalid", "out_of_bounds", "contact")
     )
     return result
-
-
-def vertical_clearance_penalty(relative_ned, cfg) -> float:
-    """Training reward preference for approaching beneath the leader.
-
-    This is not a success condition, action override, or deployment input.
-    Contact monitoring remains the authority for actual physical separation.
-    """
-    weight = float(cfg.get("vertical_clearance_weight", 0.))
-    if weight == 0:
-        return 0.
-    clearance = float(cfg.get("vertical_clearance_m", .14))
-    activation = float(cfg.get("vertical_clearance_activation_m", 2.))
-    if not all(math.isfinite(v) and v > 0 for v in (weight, clearance, activation)):
-        raise ValueError("clearance reward settings must be finite and positive")
-    relative = np.asarray(relative_ned, dtype=np.float64)
-    proximity = max(0., 1.-float(np.linalg.norm(relative))/activation)
-    below_gap = -float(relative[2])
-    deficit = float(np.clip(1.-below_gap/clearance, 0., 2.))
-    return -weight*proximity*deficit**2
 
 
 def compute_reward(

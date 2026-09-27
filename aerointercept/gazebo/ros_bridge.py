@@ -63,6 +63,7 @@ class GazeboRosBridge(Node):
         self._scenario = Scenario.sample(initial_mode, args.seed, args.reset_position_ned)
         self._scenario_started_ns = None
         self._episode_contact_baseline = 0
+        self._episode_target_scenery_baseline = 0
         self._reset_separation_position = None
         self._reset_target_hold = None
         self._terminal_exit = None
@@ -488,9 +489,11 @@ class GazeboRosBridge(Node):
                     interceptor["quaternion_enu_wxyz"],
                 ).tolist(),
                 "contact_monitor_ready": self._truth.contact_seen,
-                "hold_complete": self._terminal_exit is None,
                 "contact_count": self._truth.contact_count - self._episode_contact_baseline,
                 "last_contact": self._truth.last_contact,
+                "target_scenery_contact_count": (
+                    self._truth.target_scenery_contact_count - self._episode_target_scenery_baseline),
+                "last_target_scenery_contact": self._truth.last_target_scenery_contact,
                 "scenario": self._scenario.metadata(),
                 "vehicle_status": dict(self._vehicle_status) if self._vehicle_status else None,
                 "target_vehicle_status": dict(self._target_status) if self._target_status else None,
@@ -598,6 +601,7 @@ class GazeboRosBridge(Node):
                 if self._scenario_started_ns is None:
                     self._scenario_started_ns = self._truth.poses["x500_2"]["timestamp_ns"]
                     self._episode_contact_baseline = self._truth.contact_count
+                    self._episode_target_scenery_baseline = self._truth.target_scenery_contact_count
                 self._mode = "velocity"
                 self._velocity = decoded.ned_velocity
                 self._yaw_rate = decoded.yaw_rate

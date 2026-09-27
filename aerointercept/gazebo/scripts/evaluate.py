@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import hashlib
 import io
@@ -16,7 +17,7 @@ from aerointercept.config import DotDict
 from aerointercept.end_to_end.policy import EndToEndActorCritic
 from aerointercept.gazebo.checkpoint import load_model_weights, validate_task_checkpoint
 from aerointercept.gazebo.config import load_gazebo_config
-from aerointercept.gazebo.environment import GazeboInterceptEnv
+from aerointercept.gazebo.environment import GazeboInterceptEnv, requires_world_replacement
 from aerointercept.gazebo.expert import GazeboExpertController
 from aerointercept.gazebo.evaluation_metrics import summarize_episodes, acceptance_result
 from aerointercept.gazebo.process import maybe_launch
@@ -38,6 +39,10 @@ def main():
     parser.add_argument("--seed", type=int, default=10000)
     parser.add_argument("--suite", action="store_true", help="evaluate each training and held-out shape, episodes per mode")
     parser.add_argument("--trace", action="store_true", help="record step-level sensor, action and diagnostic state")
+    parser.add_argument("--initial-distance", type=float, default=None,
+                        help="test-only initial center distance in meters; preserves checkpoint task validation")
+    parser.add_argument("--max-speed", type=float, default=None,
+                        help="test-only Actor velocity command norm limit in m/s; does not change target motion")
     args = parser.parse_args()
     if args.episodes < 1:
         raise ValueError("--episodes must be positive")
@@ -45,6 +50,19 @@ def main():
     if args.trace and output.with_suffix(".trace.jsonl").exists():
         raise FileExistsError("trace output already exists; use a distinct run output path")
     cfg = load_gazebo_config(args.config)
+    checkpoint_cfg = copy.deepcopy(cfg)
+    test_overrides = {}
+    for flag, value in (("initial_distance_m", args.initial_distance), ("max_speed_mps", args.max_speed)):
+        if value is not None:
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{flag} must be finite and positive")
+            test_overrides[flag] = value
+    if args.initial_distance is not None:
+        cfg["gazebo"]["task"]["reset_target_distance_m"] = args.initial_distance
+    if args.max_speed is not None:
+        cfg["gazebo"]["action"]["velocity_max"] = args.max_speed
+    # Use the resolved task distance for both world spawn and physical reset.
+    args.initial_distance = float(cfg.gazebo.task.reset_target_distance_m)
     socket_path = args.socket or cfg.gazebo.bridge.socket
     stack = maybe_launch(args, socket_path)
     environment = None
@@ -54,7 +72,7 @@ def main():
         checkpoint_bytes = Path(args.checkpoint).read_bytes()
         checkpoint_sha256 = hashlib.sha256(checkpoint_bytes).hexdigest()
         checkpoint = torch.load(io.BytesIO(checkpoint_bytes), map_location=device, weights_only=False)
-        validate_task_checkpoint(checkpoint, cfg)
+        validate_task_checkpoint(checkpoint, checkpoint_cfg)
         model_config = dict(cfg.end_to_end.model)
         construction_config = DotDict(dict(model_config))
         construction_config["pretrained_weights"] = None
@@ -86,6 +104,10 @@ def main():
                 environment.episode_index = old.episode_index
                 frames, _, reset_info = environment.reset()
             episode_reward = 0.0
+            print(f"episode={episode + 1}/{len(schedule)} reset "
+                  f"requested_distance={cfg.gazebo.task.reset_target_distance_m:.2f} m "
+                  f"measured_center_distance={reset_info['target_distance_m']:.3f} m "
+                  f"velocity_command_limit={cfg.gazebo.action.velocity_max:.2f} m/s", flush=True)
             model.actor.reset_memory()
             if diagnostic_expert is not None:
                 diagnostic_expert.reset()
@@ -131,7 +153,7 @@ def main():
                         "episode_reward": None, "episode_length": environment._episode.length,
                         "minimum_distance": None, "contact_count": None,
                         "last_observed_minimum_distance": environment._episode.minimum_distance,
-                        "rendezvous_center_distance_m": None,
+                        "target_contact": None,
                     }}
                 if args.trace:
                     snapshot = environment._last_snapshot
@@ -164,6 +186,8 @@ def main():
                                                      "checkpoint": str(Path(args.checkpoint).resolve()),
                                                      "checkpoint_sha256": checkpoint_sha256,
                                                      "task_config": dict(cfg.gazebo.task),
+                                                     "action_config": dict(cfg.gazebo.action),
+                                                     "test_overrides": test_overrides,
                                                      "requested_seed": args.seed,
                                                      "reset_recoveries": reset_recoveries}, indent=2, allow_nan=False))
                     temporary.replace(progress)
@@ -173,10 +197,11 @@ def main():
                         flush=True,
                     )
                     # A physical contact can leave PX4/Gazebo in a crashed
-                    # state.  When this script owns the launch, replace the
-                    # world before asking it to reset; otherwise a later
-                    # episode would silently measure a broken simulator.
-                    if (final["outcome"] in ("contact", "ground", "invalid", "simulator_error")
+                    # state, successful interceptions included.  When this
+                    # script owns the launch, replace the world before asking it
+                    # to reset; otherwise a later episode would silently measure
+                    # a broken simulator.
+                    if ((final["outcome"] == "simulator_error" or requires_world_replacement(final))
                             and stack is not None and episode + 1 < len(schedule)):
                         old = environment
                         retired_camera_frames += old.camera_frames
@@ -205,10 +230,14 @@ def main():
             "target_seed_controlled": environment._scenario_control,
             "complete": True,
             "reset_recoveries": reset_recoveries,
-            "acceptance": acceptance_result(records, (*TRAIN_MODES, *HELD_OUT_MODES), reset_recoveries),
+            "acceptance": acceptance_result(records, (*TRAIN_MODES, *HELD_OUT_MODES), reset_recoveries,
+                                            hit_radius=float(cfg.gazebo.task["hit_radius"])),
             "scenario_results": {mode: summarize_episodes([r for r in records if r["mode"] == mode])
                                  for mode in sorted({r["mode"] for r in records})},
             "task_config": dict(cfg.gazebo.task),
+            "checkpoint_task_config": dict(checkpoint_cfg.gazebo.task),
+            "action_config": dict(cfg.gazebo.action),
+            "test_overrides": test_overrides,
             "reward_config": dict(cfg.gazebo.rewards),
             "camera_fps": (retired_camera_frames + environment.camera_frames) / elapsed,
             "elapsed_seconds": elapsed,

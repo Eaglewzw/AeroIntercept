@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from aerointercept.gazebo.task_logic import task_contract
+
 
 def _command_version(command: list[str]) -> str:
     try:
@@ -32,13 +34,20 @@ def load_model_weights(model, checkpoint: dict, model_config: dict) -> None:
 
 
 def validate_task_checkpoint(checkpoint: dict, cfg) -> None:
-    if cfg.gazebo.task.get("task_version") != "noncontact_rendezvous_v1":
-        return
+    """Reject weights recorded under a different interception contract.
+
+    Retired noncontact keys and the version label are ignored, so checkpoints
+    trained before the contact-intercept migration stay loadable; anything that
+    changes the meaning of an episode (hit radius, center reference, reset
+    distance, termination limits) must match exactly.
+    """
     task = checkpoint.get("task_config")
     if task is None:
         task = checkpoint.get("config", {}).get("gazebo", {}).get("task")
-    if task != dict(cfg.gazebo.task):
-        raise ValueError("checkpoint task differs from the current noncontact center-distance task; train with new data")
+    if task is None:
+        raise ValueError("checkpoint does not record its interception task; train with new data")
+    if task_contract(task) != task_contract(cfg.gazebo.task):
+        raise ValueError("checkpoint task differs from the current interception task; train with new data")
 
 
 def load_temporal_initialization(model, checkpoint: dict, model_config: dict) -> None:

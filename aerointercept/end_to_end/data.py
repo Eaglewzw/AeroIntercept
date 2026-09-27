@@ -38,6 +38,31 @@ def load_manifest(data_dir) -> dict:
     return manifest
 
 
+def load_episode_split(paths, split_file):
+    """Load an exhaustive, disjoint split for corrective data plus replay.
+
+    Replay episodes seen by an initialization checkpoint must stay in training;
+    randomly splitting a merged dataset can silently put them in validation.
+    Only basenames already discovered in this dataset are accepted.
+    """
+    record = json.loads(Path(split_file).read_text(encoding="utf-8"))
+    by_name = {path.name: path for path in paths}
+    if len(by_name) != len(paths):
+        raise ValueError("episode names must be unique")
+    names = []
+    for key in ("train", "validation"):
+        values = record.get(key)
+        if not isinstance(values, list) or not values or any(not isinstance(v, str) for v in values):
+            raise ValueError(f"explicit split requires a nonempty {key} filename list")
+        names.extend(values)
+    if len(set(names)) != len(names):
+        raise ValueError("explicit split has duplicate or overlapping episodes")
+    if set(names) != set(by_name):
+        raise ValueError("explicit split must contain every accepted dataset episode exactly once")
+    return ([by_name[name] for name in record["train"]],
+            [by_name[name] for name in record["validation"]])
+
+
 def split_episode_files(paths, validation_fraction: float, seed: int, *, strata=None, coverage=None):
     """Split at episode granularity so adjacent frames never leak to val."""
     paths = list(paths)

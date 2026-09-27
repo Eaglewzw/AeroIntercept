@@ -24,6 +24,10 @@ class SimulatorTruth:
         self.contact_seen = False
         self.contact_count = 0
         self.last_contact = None
+        # Contacts of the cooperative target alone are recorded for audit but
+        # are not evidence about the interceptor's episode.
+        self.target_scenery_contact_count = 0
+        self.last_target_scenery_contact = None
         self._reported_contact_pairs = set()
         self.world = world
         self.node.subscribe(Pose_V, "/aerointercept/model_poses", self.on_poses)
@@ -63,6 +67,14 @@ class SimulatorTruth:
                 owners_a = {name for name in names if name in a}
                 owners_b = {name for name in names if name in b}
                 if not (owners_a or owners_b) or owners_a & owners_b:
+                    continue
+                if "x500_depth_1" not in owners_a | owners_b:
+                    # The cooperative target hit the scenery. That says nothing
+                    # about the interceptor, so it must not end its episode as a
+                    # collision; keep it as an auditable event instead.
+                    self.target_scenery_contact_count += 1
+                    self.last_target_scenery_contact = [a, b]
+                    print("GAZEBO_TARGET_CONTACT="+json.dumps({"pair": [a, b]}), flush=True)
                     continue
                 self.contact_count += 1
                 self.last_contact = [a, b]

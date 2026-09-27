@@ -11,7 +11,7 @@ import numpy as np
 
 from aerointercept.end_to_end.data import DATASET_SCHEMA_VERSION
 from aerointercept.gazebo.config import load_gazebo_config
-from aerointercept.gazebo.environment import GazeboInterceptEnv
+from aerointercept.gazebo.environment import GazeboInterceptEnv, requires_world_replacement
 from aerointercept.gazebo.dataset_integrity import recover_summaries, save_episode
 from aerointercept.gazebo.expert import GazeboExpertController, expert_name
 from aerointercept.gazebo.process import maybe_launch
@@ -42,13 +42,11 @@ def parse_args():
     parser.add_argument("--behavior-checkpoint", default=None,
                         help="optional visual policy for corrective imitation data collection")
     parser.add_argument("--expert-weight", type=float, default=.8)
-    parser.add_argument("--blend-schedule", choices=("legacy", "guarded"), default="legacy",
-                        help="guarded allows near-range policy observations with predictive teacher takeover")
     parser.add_argument("--device", default="cuda:0")
     return parser.parse_args()
 
 
-def collect_episode(env, expert, behavior=None, expert_weight=.8, blend_schedule="legacy"):
+def collect_episode(env, expert, behavior=None, expert_weight=.8):
     frames, training, reset_info = env.reset()
     expert.reset()
     if behavior is not None and hasattr(behavior, "reset_memory"):
@@ -85,15 +83,7 @@ def collect_episode(env, expert, behavior=None, expert_weight=.8, blend_schedule
         if behavior is not None:
             # Only the collector mixes a privileged teacher and a visual
             # behavior policy. Labels always contain the teacher correction.
-            # Fade to the teacher inside 2 m to keep collection noncontact.
-            weight = 1. - (1.-expert_weight)*float(np.clip((distance-2.)/3., 0., 1.))
-            if blend_schedule == "guarded":
-                closing = float(np.dot(state["interceptor_velocity"]-state["target_velocity"],
-                                       delta/max(distance, 1e-6)))
-                predicted = distance-max(0., closing)*float(env.cfg.gazebo.expert.braking_lookahead_seconds)
-                # Privileged collection-only takeover; no truth-based fallback
-                # is introduced into the evaluated visual policy.
-                weight = 1. if predicted < .65 or not bool(training["confidence"]) else expert_weight
+            weight = expert_weight
             executed_action = weight*action + (1.-weight)*behavior(frames, own_state)
         collected["center_distance_m"].append(distance)
         collected["executed_actions"].append(executed_action.copy())
@@ -128,9 +118,16 @@ def collect_episode(env, expert, behavior=None, expert_weight=.8, blend_schedule
     for key in ("center_distance_m", "executed_actions", "teacher_weight"):
         arrays[key] = np.asarray(collected[key], dtype=np.float32)
     arrays["supervision_valid"] = np.asarray(collected["supervision_valid"], dtype=np.uint8)
-    if final["outcome"] in ("contact", "ground", "invalid", "out_of_bounds"):
-        # Exclude the lead-up to a physical failure, while retaining separately
-        # measured earlier correction fragments. Never relabel a failure hit.
+    if (final["outcome"] in ("contact", "ground", "invalid", "out_of_bounds")
+            and not final.get("target_contact")
+            and (behavior is None or expert_weight == 1.)):
+        # A teacher-driven failure is evidence against its final labels.
+        # Corrective rollouts execute a DIFFERENT action: censoring their tail
+        # would discard the expert corrections exactly where the policy fails.
+        # Those labels still require a contact-free input and finite actions
+        # via the per-transition mask above; post-contact states are never kept.
+        # Touching the target is the success this task asks for, so its terminal
+        # approach is the demonstration worth keeping, not a failure tail.
         timestamps = np.asarray(collected.get("image_timestamp_ns", []), dtype=np.int64)
         if len(timestamps):
             arrays["supervision_valid"][timestamps >= timestamps[-1]-1_000_000_000] = 0
@@ -240,7 +237,9 @@ def main():
         contract["behavior"] = {
             "checkpoint": str(path.resolve()), "sha256": hashlib.sha256(checkpoint_bytes).hexdigest(),
             "expert_weight": args.expert_weight,
-            "protocol": "teacher_blend_fade_2m_5m_v1" if args.blend_schedule == "legacy" else "teacher_blend_predictive_guard_v1",
+            "protocol": "constant_teacher_blend_v1",
+            "failure_tail": ("retain_pre_transition_corrections_v1" if args.expert_weight < 1.
+                             else "exclude_final_second_v1"),
         }
         checkpoint = torch.load(path, map_location=args.device, weights_only=False)
         validate_task_checkpoint(checkpoint, cfg)
@@ -293,7 +292,7 @@ def main():
         for selected_mode, mode_episodes in remaining_plan:
             env.mode = selected_mode
             for _ in range(mode_episodes):
-                arrays, summary = collect_episode(env, expert, behavior, args.expert_weight, args.blend_schedule)
+                arrays, summary = collect_episode(env, expert, behavior, args.expert_weight)
                 summary["mode"] = selected_mode
                 final_path = episodes_dir / f"episode_{episode_index:06d}.npz"
                 save_episode(final_path, arrays, summary)
@@ -304,13 +303,13 @@ def main():
                 hits = sum(item["outcome"] == "hit" for item in summaries)
                 print(
                     f"[{episode_index}/{episode_count}] frames={total_frames:,} "
-                    f"rendezvous_success={hits / episode_index:.1%} "
+                    f"intercept_success={hits / episode_index:.1%} "
                     f"mode={selected_mode} last={summary['outcome']} "
                     f"min={summary['minimum_distance']:.3f}", flush=True,
                 )
-                if summary["outcome"] in ("contact", "ground", "invalid") and episode_index < episode_count:
+                if requires_world_replacement(summary) and episode_index < episode_count:
                     if stack is None:
-                        raise RuntimeError("a physical failure requires --launch for simulator recovery")
+                        raise RuntimeError("a physical contact requires --launch for simulator recovery")
                     env.close()
                     stack.close()
                     stack = maybe_launch(args, socket_path)
