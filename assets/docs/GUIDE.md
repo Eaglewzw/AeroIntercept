@@ -33,8 +33,8 @@ mkdir -p artifacts/runs/training
 mkdir "$RUN_DIR" || exit 1
 nohup python -u -m aerointercept.training.train_e2e_bc \
   --backend gazebo --config configs/gazebo_feedback.yaml \
-  --data artifacts/data/noncontact_combined_20260925 \
-  --init-checkpoint artifacts/runs/training/corrective_100_20260925/best.pt \
+  --data artifacts/data/gazebo_corrective_v2_20260927 \
+  --init-checkpoint artifacts/runs/training/recollect_v2_20260925/remote_training/best.pt \
   --epochs 20 --patience 5 --batch-size 2 --sequence-length 16 \
   --learning-rate 0.0001 --action-loss-weight 20 \
   --selection-metric action --split mode_visibility --visible-action-only --seed 0 --device cuda:0 \
@@ -44,22 +44,13 @@ echo "$RUN_DIR"
 ```
 
 日志为 `train.log`，最佳验证动作模型为 `best.pt`，逐轮诊断为 `best.history.jsonl`。
+使用 `--init-checkpoint` 或架构迁移初始化微调时，第 0 轮先在当前验证集评估初始化模型；只有改善指定验证指标的后续轮次才会替换它。如果 `best_epoch` 为 0，表示微调未优于初始化模型。
+少量纠偏数据可在运行配置中设置 `end_to_end.bc.keep_all_batch_norm_eval: true`，冻结整个 Actor 的 BatchNorm 运行统计，仿射参数仍参与训练。默认关闭，保留从头训练的行为。
+纠偏采集可用 `collect_bc_data --behavior-checkpoint <原权重> --expert-weight 0.5`：执行动作由模型与专家混合，监督标签仍为专家动作。训练、验证和闭环复测应使用独立场景种子；验证动作损失改善后仍须通过闭环复测。
+设置 `--expert-weight 0` 可记录纯模型执行时的专家纠正标签。合并旧训练样本做回放时，使用 `--split-file split.json` 固定划分，文件包含 `train` 和 `validation` 两个文件名列表，须不重复且覆盖整个数据集；初始化模型见过的旧样本只能放入训练集。
+模型参与控制的失败回合会保留接触前、有效观测上的专家纠正标签；失败的是执行动作，不应据此删除不同的专家标签。纯专家控制失败时仍排除最后一秒。此规则记入采集契约的 `behavior.failure_tail`，旧纠偏目录不能按新规则续采，应新建目录。
+需要强调末段控制时，可配置 `end_to_end.auxiliary.near_action_weight`（默认 1）与 `near_action_radius_m`（默认 2 米）。该权重只用于已记录距离对应的训练/验证动作损失，仍遵循有效性掩码和 `--visible-action-only` 设置；部署动作不增加距离约束。
 训练权重与日志放在 `artifacts/runs/training/`，闭环报告与轨迹放在 `artifacts/runs/experiments/`；数据集放 `artifacts/data/`。数据与模型不随 Git 分发。
-
-## 查看服务器历史训练
-
-服务器路径尚未迁移，本次仅整理本地工程。服务器原始训练仍在独立目录：
-
-```bash
-ssh root@36.150.116.206 -p 33747
-cd /root/AeroIntercept_optimization_20260925
-cat artifacts/runs/corrective_100_20260925/status.json
-tail -f artifacts/runs/corrective_100_20260925/train.log
-```
-
-100 轮训练已完成。该目录的 `best.pt` 为第 99 轮最佳权重；旧权重已删除，历史日志和评估记录保留。
-复用环境 `/root/AeroIntercept_remote_20260924/.venv/bin/python`，已验证 ROCm BC；
-Gazebo/PX4 闭环评估在本地完成。同步工程时保留正在写入的远端运行目录。
 
 ## 模型输入与协议
 
@@ -91,4 +82,16 @@ Gazebo/PX4 闭环评估在本地完成。同步工程时保留正在写入的远
 | Actor 导出 | `aerointercept.export_e2e` |
 
 回归测试：`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q`。
-训练历史见 [TRAINING.md](TRAINING.md)，实验结果及验收条件见 [EXPERIMENTS.md](EXPERIMENTS.md)。
+训练结果、闭环评估与验收条件见 [RESULTS.md](RESULTS.md)。
+
+### 接触式拦截成功标准（contact_intercept_v1）
+
+Gazebo 任务只有一种语义：两机中心在一步内的最小距离 ≤0.5 m，或检测到两机之间的接触，即成功。
+距离在 `gazebo_base_link_center_enu_to_ned_v2` 基准上测量，配置加载时会校验这一基准与接触监视器。
+拦截机撞地面、撞到目标之外的物体、无效状态和越界都是失败，命中不会覆盖它们；速度指令上限为 8 m/s。
+接触按机体归属：只有拦截机参与的碰撞才计入本回合；目标自己撞到树木或地面时记入
+`target_scenery_contact_count` 供审计，不会让拦截回合以碰撞结束。
+接触次数与目标接触继续如实记录：撞到目标本身就是成功，撞到别处才是失败。
+任何发生过接触的回合（成功拦截通常就是接触）都会在下一回合前重建世界，避免从坠毁状态复位。
+成功不再要求相对速度或保持时间，成功之后也不再执行稳定性验证。
+历史报告中的旧 noncontact_rendezvous_v1 结果按当时的判据统计，不能直接当作本标准的成功率。

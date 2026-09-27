@@ -6,3 +6,5 @@ __pycache__/
 !/artifacts/.gitkeep
 .pytest_cache/
 .idea/
+# Trained weights stay local: large binaries, versioned outside Git.
+/assets/models/

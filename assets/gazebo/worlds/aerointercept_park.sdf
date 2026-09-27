@@ -1,91 +1,386 @@
-<?xml version="1.0"?>
-<sdf version="1.9">
-  <world name="aerointercept_park">
-    <physics name="physics" type="ode">
-      <max_step_size>0.004</max_step_size>
-      <real_time_factor>1.0</real_time_factor>
+<sdf version='1.10'>
+  <world name='aerointercept_park'>
+    <physics name='physics' type='ode'>
+      <max_step_size>0.0040000000000000001</max_step_size>
+      <real_time_factor>1</real_time_factor>
       <real_time_update_rate>250</real_time_update_rate>
     </physics>
-    <gravity>0 0 -9.8</gravity>
-    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
-    <atmosphere type="adiabatic"/>
-    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
-    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
-    <!-- PX4 creates models in UserCommands::PreUpdate. Contact must see those
-         new entities in the same update before the ECS clears its new flags. -->
-    <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
-    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
-    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+    <gravity>0 0 -9.8000000000000007</gravity>
+    <magnetic_field>6.0000000000000002e-06 2.3e-05 -4.1999999999999998e-05</magnetic_field>
+    <atmosphere type='adiabatic'/>
+    <plugin name='gz::sim::systems::Physics' filename='gz-sim-physics-system'/>
+    <plugin name='gz::sim::systems::UserCommands' filename='gz-sim-user-commands-system'/>
+    <plugin name='gz::sim::systems::Contact' filename='gz-sim-contact-system'/>
+    <plugin name='gz::sim::systems::SceneBroadcaster' filename='gz-sim-scene-broadcaster-system'/>
+    <plugin name='gz::sim::systems::Sensors' filename='gz-sim-sensors-system'>
       <render_engine>ogre2</render_engine>
     </plugin>
-    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
-    <plugin filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure"/>
-    <plugin filename="gz-sim-magnetometer-system" name="gz::sim::systems::Magnetometer"/>
-    <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat"/>
-
+    <plugin name='gz::sim::systems::Imu' filename='gz-sim-imu-system'/>
+    <plugin name='gz::sim::systems::AirPressure' filename='gz-sim-air-pressure-system'/>
+    <plugin name='gz::sim::systems::Magnetometer' filename='gz-sim-magnetometer-system'/>
+    <plugin name='gz::sim::systems::NavSat' filename='gz-sim-navsat-system'/>
     <spherical_coordinates>
       <surface_model>EARTH_WGS84</surface_model>
       <world_frame_orientation>ENU</world_frame_orientation>
-      <latitude_deg>47.397971</latitude_deg>
+      <latitude_deg>47.397970999999998</latitude_deg>
       <longitude_deg>8.546163</longitude_deg>
-      <elevation>488.0</elevation>
+      <elevation>488</elevation>
       <heading_deg>0</heading_deg>
     </spherical_coordinates>
     <scene>
       <grid>false</grid>
-      <ambient>0.43 0.46 0.47 1</ambient>
-      <background>0.58 0.70 0.82 1</background>
+      <ambient>0.430000007 0.460000008 0.469999999 1</ambient>
+      <background>0.579999983 0.699999988 0.819999993 1</background>
       <shadows>true</shadows>
-      <sky><time>14.25</time><clouds><speed>0.05</speed><humidity>0.36</humidity></clouds></sky>
-      <fog><type>linear</type><color>0.66 0.72 0.75 1</color><start>85</start><end>260</end><density>0.002</density></fog>
+      <sky>
+        <time>14.25</time>
+        <clouds>
+          <speed>0.050000000000000003</speed>
+          <humidity>0.35999999999999999</humidity>
+        </clouds>
+      </sky>
+      <fog>
+        <type>linear</type>
+        <color>0.660000026 0.720000029 0.75 1</color>
+        <start>85</start>
+        <end>260</end>
+        <density>0.002</density>
+      </fog>
     </scene>
-    <light name="sun" type="directional">
-      <cast_shadows>true</cast_shadows>
-      <pose>0 0 100 0 0 0</pose>
-      <diffuse>0.92 0.89 0.82 1</diffuse>
-      <specular>0.12 0.12 0.11 1</specular>
-      <direction>-0.36 0.24 -0.90</direction>
-      <intensity>1.05</intensity>
-    </light>
-
-    <!-- Local PBR ground stays deterministic and works without a network cache. -->
-    <include><uri>model://aerointercept_park_surface</uri></include>
-
-    <!-- Fuel tree meshes replace the former sphere-and-cylinder cartoon trees. -->
-    <include><uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri><name>oak_north_0</name><pose>-18 22 0 0 0 0.3</pose></include>
-    <include><uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri><name>oak_north_1</name><pose>-5 25 0 0 0 -0.8</pose></include>
-    <include><uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri><name>pine_north_0</name><pose>11 24 0 0 0 0.6</pose></include>
-    <include><uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri><name>oak_north_2</name><pose>20 30 0 0 0 1.2</pose></include>
-    <include><uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri><name>pine_east_0</name><pose>25 32 0 0 0 -0.4</pose></include>
-    <include><uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri><name>oak_east_0</name><pose>10 36 0 0 0 0.9</pose></include>
-    <include><uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri><name>pine_south_0</name><pose>24 -32 0 0 0 0.2</pose></include>
-    <include><uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri><name>oak_south_0</name><pose>12 -25 0 0 0 -1.1</pose></include>
-    <include><uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri><name>oak_south_1</name><pose>-5 -24 0 0 0 0.7</pose></include>
-    <include><uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri><name>pine_south_1</name><pose>-22 -20 0 0 0 -0.2</pose></include>
-    <include><uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri><name>oak_west_0</name><pose>-31 -7 0 0 0 0.5</pose></include>
-    <include><uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri><name>pine_west_0</name><pose>-29 10 0 0 0 -0.9</pose></include>
-
-    <!-- A small amount of local architecture gives depth while keeping the flight corridor clear. -->
-    <model name="park_details">
+    <include>
+      <uri>model://aerointercept_park_surface</uri>
+      <name>aerointercept_park_surface</name>
+      <pose>0 0 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri>
+      <name>oak_north_0</name>
+      <pose>-18 22 0 0 0 0.30000000000000021</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri>
+      <name>oak_north_1</name>
+      <pose>-19.777990341186523 40.215988159179688 0 0 0 -0.79999999566814339</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri>
+      <name>pine_north_0</name>
+      <pose>11 24 0 0 0 0.59999999999999998</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri>
+      <name>oak_north_2</name>
+      <pose>20 30 0 0 0 1.2000000000000002</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri>
+      <name>pine_east_0</name>
+      <pose>25 32 0 0 0 -0.39999999999999997</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri>
+      <name>oak_east_0</name>
+      <pose>10 36 0 0 0 0.90000000000000002</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri>
+      <name>pine_south_0</name>
+      <pose>24 -32 0 0 0 0.20000000000000009</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri>
+      <name>oak_south_0</name>
+      <pose>12 -25 0 0 0 -1.1000000000000001</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri>
+      <name>oak_south_1</name>
+      <pose>-5 -24 0 0 0 0.69999999999999973</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri>
+      <name>pine_south_1</name>
+      <pose>-22 -20 0 0 0 -0.20000000000000009</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak Tree</uri>
+      <name>oak_west_0</name>
+      <pose>-31 -7 0 0 0 0.49999999999999994</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri>
+      <name>pine_west_0</name>
+      <pose>-29 10 0 0 0 -0.90000000000000002</pose>
+    </include>
+    <model name='park_details'>
       <static>true</static>
-      <link name="water_and_stone">
-        <visual name="pond"><pose>-14 13 0.035 0 0 0</pose><geometry><cylinder><radius>4.7</radius><length>0.06</length></cylinder></geometry><material><ambient>0.025 0.105 0.14 1</ambient><diffuse>0.055 0.22 0.28 1</diffuse><specular>0.82 0.82 0.82 1</specular><pbr><metal><metalness>0.0</metalness><roughness>0.12</roughness></metal></pbr></material></visual>
-        <collision name="boulder_0_collision"><pose>18 -15 .48 0 .15 .2</pose><geometry><ellipsoid><radii>1.25 .84 .48</radii></ellipsoid></geometry></collision>
-        <visual name="boulder_0"><pose>18 -15 .48 0 .15 .2</pose><geometry><ellipsoid><radii>1.25 .84 .48</radii></ellipsoid></geometry><material><diffuse>.24 .25 .23 1</diffuse><pbr><metal><metalness>0.0</metalness><roughness>0.92</roughness></metal></pbr></material></visual>
-        <collision name="boulder_1_collision"><pose>-8 19 .38 .1 0 -.3</pose><geometry><ellipsoid><radii>.82 .62 .38</radii></ellipsoid></geometry></collision>
-        <visual name="boulder_1"><pose>-8 19 .38 .1 0 -.3</pose><geometry><ellipsoid><radii>.82 .62 .38</radii></ellipsoid></geometry><material><diffuse>.31 .30 .27 1</diffuse><pbr><metal><metalness>0.0</metalness><roughness>0.90</roughness></metal></pbr></material></visual>
+      <link name='water_and_stone'>
+        <visual name='pond'>
+          <pose>-14 13 0.035000000000000003 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>4.7000000000000002</radius>
+              <length>0.059999999999999998</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.0250000004 0.104999997 0.140000001 1</ambient>
+            <diffuse>0.0549999997 0.219999999 0.280000001 1</diffuse>
+            <specular>0.819999993 0.819999993 0.819999993 1</specular>
+            <pbr>
+              <metal>
+                <metalness>0.0</metalness>
+                <roughness>0.12</roughness>
+              </metal>
+            </pbr>
+          </material>
+        </visual>
+        <collision name='boulder_0_collision'>
+          <pose>18 -15 0.47999999999999998 0 0.15000000000000002 0.19999999999999998</pose>
+          <geometry>
+            <ellipsoid>
+              <radii>1.25 0.83999999999999997 0.47999999999999998</radii>
+            </ellipsoid>
+          </geometry>
+          <surface>
+            <friction>
+              <ode/>
+            </friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <visual name='boulder_0'>
+          <pose>18 -15 0.47999999999999998 0 0.15000000000000002 0.19999999999999998</pose>
+          <geometry>
+            <ellipsoid>
+              <radii>1.25 0.83999999999999997 0.47999999999999998</radii>
+            </ellipsoid>
+          </geometry>
+          <material>
+            <diffuse>0.239999995 0.25 0.230000004 1</diffuse>
+            <pbr>
+              <metal>
+                <metalness>0.0</metalness>
+                <roughness>0.92</roughness>
+              </metal>
+            </pbr>
+          </material>
+        </visual>
+        <collision name='boulder_1_collision'>
+          <pose>-8 19 0.38 0.10000000000000002 1.7347234759768071e-18 -0.30000000000000004</pose>
+          <geometry>
+            <ellipsoid>
+              <radii>0.81999999999999995 0.62 0.38</radii>
+            </ellipsoid>
+          </geometry>
+          <surface>
+            <friction>
+              <ode/>
+            </friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <visual name='boulder_1'>
+          <pose>-8 19 0.38 0.10000000000000002 1.7347234759768071e-18 -0.30000000000000004</pose>
+          <geometry>
+            <ellipsoid>
+              <radii>0.81999999999999995 0.62 0.38</radii>
+            </ellipsoid>
+          </geometry>
+          <material>
+            <diffuse>0.310000002 0.300000012 0.270000011 1</diffuse>
+            <pbr>
+              <metal>
+                <metalness>0.0</metalness>
+                <roughness>0.90</roughness>
+              </metal>
+            </pbr>
+          </material>
+        </visual>
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>1</mass>
+          <inertia>
+            <ixx>1</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>1</iyy>
+            <iyz>0</iyz>
+            <izz>1</izz>
+          </inertia>
+        </inertial>
+        <enable_wind>false</enable_wind>
       </link>
-      <link name="pavilion"><pose>-22 -12 0 0 0 0.25</pose>
-        <collision name="post_0_collision"><pose>-2 -2 1.45 0 0 0</pose><geometry><cylinder><radius>.13</radius><length>2.9</length></cylinder></geometry></collision>
-        <collision name="post_1_collision"><pose>2 -2 1.45 0 0 0</pose><geometry><cylinder><radius>.13</radius><length>2.9</length></cylinder></geometry></collision>
-        <collision name="post_2_collision"><pose>-2 2 1.45 0 0 0</pose><geometry><cylinder><radius>.13</radius><length>2.9</length></cylinder></geometry></collision>
-        <collision name="post_3_collision"><pose>2 2 1.45 0 0 0</pose><geometry><cylinder><radius>.13</radius><length>2.9</length></cylinder></geometry></collision>
-        <visual name="post_0"><pose>-2 -2 1.45 0 0 0</pose><geometry><cylinder><radius>.13</radius><length>2.9</length></cylinder></geometry><material><diffuse>.30 .20 .11 1</diffuse></material></visual>
-        <visual name="post_1"><pose>2 -2 1.45 0 0 0</pose><geometry><cylinder><radius>.13</radius><length>2.9</length></cylinder></geometry><material><diffuse>.30 .20 .11 1</diffuse></material></visual>
-        <visual name="post_2"><pose>-2 2 1.45 0 0 0</pose><geometry><cylinder><radius>.13</radius><length>2.9</length></cylinder></geometry><material><diffuse>.30 .20 .11 1</diffuse></material></visual>
-        <visual name="post_3"><pose>2 2 1.45 0 0 0</pose><geometry><cylinder><radius>.13</radius><length>2.9</length></cylinder></geometry><material><diffuse>.30 .20 .11 1</diffuse></material></visual>
-        <visual name="roof"><pose>0 0 3.05 0 0 0</pose><geometry><cone><radius>3.6</radius><length>1.25</length></cone></geometry><material><diffuse>.18 .16 .13 1</diffuse><pbr><metal><metalness>0.0</metalness><roughness>0.82</roughness></metal></pbr></material></visual>
+      <link name='pavilion'>
+        <pose>-22 -12 0 0 0 0.25000000000000011</pose>
+        <collision name='post_0_collision'>
+          <pose>-2 -2 1.45 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.13</radius>
+              <length>2.8999999999999999</length>
+            </cylinder>
+          </geometry>
+          <surface>
+            <friction>
+              <ode/>
+            </friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <collision name='post_1_collision'>
+          <pose>2 -2 1.45 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.13</radius>
+              <length>2.8999999999999999</length>
+            </cylinder>
+          </geometry>
+          <surface>
+            <friction>
+              <ode/>
+            </friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <collision name='post_2_collision'>
+          <pose>-2 2 1.45 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.13</radius>
+              <length>2.8999999999999999</length>
+            </cylinder>
+          </geometry>
+          <surface>
+            <friction>
+              <ode/>
+            </friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <collision name='post_3_collision'>
+          <pose>2 2 1.45 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.13</radius>
+              <length>2.8999999999999999</length>
+            </cylinder>
+          </geometry>
+          <surface>
+            <friction>
+              <ode/>
+            </friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <visual name='post_0'>
+          <pose>-2 -2 1.45 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.13</radius>
+              <length>2.8999999999999999</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <diffuse>0.300000012 0.200000003 0.109999999 1</diffuse>
+          </material>
+        </visual>
+        <visual name='post_1'>
+          <pose>2 -2 1.45 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.13</radius>
+              <length>2.8999999999999999</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <diffuse>0.300000012 0.200000003 0.109999999 1</diffuse>
+          </material>
+        </visual>
+        <visual name='post_2'>
+          <pose>-2 2 1.45 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.13</radius>
+              <length>2.8999999999999999</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <diffuse>0.300000012 0.200000003 0.109999999 1</diffuse>
+          </material>
+        </visual>
+        <visual name='post_3'>
+          <pose>2 2 1.45 0 0 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.13</radius>
+              <length>2.8999999999999999</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <diffuse>0.300000012 0.200000003 0.109999999 1</diffuse>
+          </material>
+        </visual>
+        <visual name='roof'>
+          <pose>0 0 3.0499999999999998 0 0 0</pose>
+          <geometry>
+            <cone>
+              <radius>3.6000000000000001</radius>
+              <length>1.25</length>
+            </cone>
+          </geometry>
+          <material>
+            <diffuse>0.180000007 0.159999996 0.129999995 1</diffuse>
+            <pbr>
+              <metal>
+                <metalness>0.0</metalness>
+                <roughness>0.82</roughness>
+              </metal>
+            </pbr>
+          </material>
+        </visual>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>1</mass>
+          <inertia>
+            <ixx>1</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>1</iyy>
+            <iyz>0</iyz>
+            <izz>1</izz>
+          </inertia>
+        </inertial>
+        <enable_wind>false</enable_wind>
       </link>
+      <pose>0 0 0 0 0 0</pose>
+      <self_collide>false</self_collide>
     </model>
+    <light name='sun' type='directional'>
+      <pose>0 0 100 0 0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <intensity>1.05</intensity>
+      <direction>-0.35999999999999999 0.23999999999999999 -0.90000000000000002</direction>
+      <diffuse>0.920000017 0.889999986 0.819999993 1</diffuse>
+      <specular>0.119999997 0.119999997 0.109999999 1</specular>
+      <attenuation>
+        <range>10</range>
+        <linear>1</linear>
+        <constant>1</constant>
+        <quadratic>0</quadratic>
+      </attenuation>
+      <spot>
+        <inner_angle>0</inner_angle>
+        <outer_angle>0</outer_angle>
+        <falloff>0</falloff>
+      </spot>
+    </light>
   </world>
 </sdf>

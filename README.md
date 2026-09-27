@@ -1,6 +1,6 @@
 # AeroIntercept
 
-### 面向自主无人机拦截的端到端视觉强化学习与仿真验证平台
+### 面向自主无人机的端到端视觉强化学习与仿真验证平台
 
 <div align="center">
 
@@ -12,7 +12,7 @@
 
 </div>
 
-AeroIntercept 面向移动无人机目标的视觉跟踪与近距离非接触会合研究，将机载视觉策略、
+AeroIntercept 面向移动无人机目标的视觉跟踪与接触式拦截研究，将机载视觉策略、
 学习算法和 Gazebo/PX4 物理仿真整合为一个可训练、可评估的工程。
 策略直接接收连续 RGB 图像与飞控自身状态，输出三维速度和偏航角速度指令。
 
@@ -46,7 +46,7 @@ Actor 使用两帧 **640 × 640 RGB** 图像和 **6 维自身状态**（三轴�
 基于 **Gazebo Harmonic + PX4 SITL + ROS 2 Humble**，使用双 x500 无人机、机载相机和公园场景。
 PX4 负责底层飞行控制，策略通过 Offboard 接口发送速度指令。
 
-默认任务从约 **10 m** 两机中心距开始，以 **0.5 m** 为会合半径，并检查相对速度、保持时间与接触状态。
+默认任务从约 **10 m** 两机中心距开始，以 **0.5 m** 为命中半径：两机接触，或一步内最小中心距进入该半径即为成功。
 目标采用受限合作运动，用于研究视觉策略的跟踪、接近和泛化能力。项目仍处于研究验证阶段。
 
 ## 快速体验
@@ -59,12 +59,14 @@ PX4 负责底层飞行控制，策略通过 Offboard 接口发送速度指令。
 ```bash
 conda activate AeroIntercept
 
-python -m aerointercept.gazebo.scripts.evaluate \
-  --launch --device cuda:0 \
-  --config configs/gazebo_feedback.yaml \
-  --checkpoint artifacts/runs/training/corrective_100_20260925/best.pt \
-  --mode stop_go --episodes 4 --seed 10016 \
-  --output artifacts/runs/experiments/visual_demo/evaluation.json
+  python -m aerointercept.gazebo.scripts.evaluate \
+    --launch --device cuda:0 \
+    --config configs/gazebo_feedback.yaml \
+    --checkpoint artifacts/runs/training/corrective_100_20260925/best.pt \
+    --initial-distance 30 --max-speed 5 \
+    --mode stop_go --episodes 4 --seed 10016 \
+    --output "artifacts/runs/experiments/demo_30m_$(date +%Y%m%d_%H%M%S)/evaluation.json"
+
 ```
 
 `--mode` 可切换目标运动类型；添加 `--headless` 可关闭图形界面，按 `Ctrl+C` 停止运行。
@@ -80,3 +82,5 @@ python -m aerointercept.gazebo.scripts.evaluate \
 | `artifacts/runs/training/` | 权重、训练日志与离线指标 |
 | `artifacts/runs/experiments/` | 闭环评估报告与轨迹 |
 | `tests/` | 回归测试 |
+
+训练结果、闭环评估与正式验收标准见[结果与验收](assets/docs/RESULTS.md)。
