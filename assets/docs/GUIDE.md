@@ -50,7 +50,7 @@ echo "$RUN_DIR"
 设置 `--expert-weight 0` 可记录纯模型执行时的专家纠正标签。合并旧训练样本做回放时，使用 `--split-file split.json` 固定划分，文件包含 `train` 和 `validation` 两个文件名列表，须不重复且覆盖整个数据集；初始化模型见过的旧样本只能放入训练集。
 模型参与控制的失败回合会保留接触前、有效观测上的专家纠正标签；失败的是执行动作，不应据此删除不同的专家标签。纯专家控制失败时仍排除最后一秒。此规则记入采集契约的 `behavior.failure_tail`，旧纠偏目录不能按新规则续采，应新建目录。
 需要强调末段控制时，可配置 `end_to_end.auxiliary.near_action_weight`（默认 1）与 `near_action_radius_m`（默认 2 米）。该权重只用于已记录距离对应的训练/验证动作损失，仍遵循有效性掩码和 `--visible-action-only` 设置；部署动作不增加距离约束。
-训练权重与日志放在 `artifacts/runs/training/`，闭环报告与轨迹放在 `artifacts/runs/experiments/`；数据集放 `artifacts/data/`。数据与模型不随 Git 分发。
+训练权重与日志放在 `artifacts/runs/training/`，闭环报告与轨迹放在 `artifacts/runs/experiments/`；数据集放 `artifacts/data/`。这些目录不随 Git 分发，随仓库提供的保留权重只有 `assets/models/best.pt`。
 
 ## 模型输入与协议
 

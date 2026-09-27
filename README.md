@@ -52,7 +52,8 @@ PX4 负责底层飞行控制，策略通过 Offboard 接口发送速度指令。
 ## 快速体验
 
 先按 [使用指南](assets/docs/GUIDE.md) 配置仿真依赖与 Python 环境，并核对
-[主配置](configs/gazebo_feedback.yaml) 中的本机路径。数据和训练权重不随 Git 分发。
+[主配置](configs/gazebo_feedback.yaml) 中的本机路径。数据集与训练产物不随 Git 分发，
+仓库内的 `assets/models/best.pt` 是随仓库提供的保留权重。
 
 在工程根目录激活环境后，使用已有权重启动可视化演示：
 
@@ -62,7 +63,7 @@ conda activate AeroIntercept
   python -m aerointercept.gazebo.scripts.evaluate \
     --launch --device cuda:0 \
     --config configs/gazebo_feedback.yaml \
-    --checkpoint artifacts/runs/training/corrective_100_20260925/best.pt \
+    --checkpoint assets/models/best.pt \
     --initial-distance 30 --max-speed 5 \
     --mode stop_go --episodes 4 --seed 10016 \
     --output "artifacts/runs/experiments/demo_30m_$(date +%Y%m%d_%H%M%S)/evaluation.json"
