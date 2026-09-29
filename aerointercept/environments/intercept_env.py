@@ -53,15 +53,15 @@ class InterceptEnv(gym.Env):
                                  c.camera.image_width, c.camera.image_height)
         self.teacher = PNGTeacher.from_config(c)
 
-        # 动作解码常数
+        # 动作解码常数（速度域 [0, dynamics.v_max]，无人为限幅）
         self._decode_kw = dict(
             dv_angle_max=c.action.dv_angle_max,
-            speed_min=c.png.speed_min, speed_cmd=c.png.speed_cmd,
+            speed_max=c.dynamics.v_max,
             yaw_rate_max=c.png.yaw_rate_max, elev_clamp=c.png.elev_clamp,
         )
         self._encode_kw = dict(
             dv_angle_max=c.action.dv_angle_max,
-            speed_min=c.png.speed_min, speed_cmd=c.png.speed_cmd,
+            speed_max=c.dynamics.v_max,
             yaw_rate_max=c.png.yaw_rate_max,
         )
 
@@ -116,7 +116,7 @@ class InterceptEnv(gym.Env):
         rw = self.rw
         reward = (rw.w_close
                   * (transition.previous_distance - transition.distance)
-                  / self.dt / c.png.speed_cmd)
+                  / self.dt / c.dynamics.v_max)
         reward -= rw.time_penalty
         reward -= rw.w_smooth * float(np.sum((action - self.prev_action) ** 2))
         if det is not None:
@@ -182,8 +182,7 @@ class InterceptEnv(gym.Env):
         ]).astype(np.float32)
 
         # PNG 老师动作标签（老师状态每步推进一次，与策略共享同一检测流）
-        cmd = self.teacher.step(det, d.roll, d.pitch, d.yaw,
-                                d.vel[0], d.vel[1], d.vel[2])
+        cmd = self.teacher.step(det, d.roll, d.pitch, d.yaw)
         teacher_action = encode_action_from_velocity(
             cmd.vx, cmd.vy, cmd.vz, cmd.yaw_rate,
             self.fb.los_v, self.fb.los_z, **self._encode_kw)

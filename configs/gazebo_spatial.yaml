@@ -39,15 +39,11 @@ gazebo:
     velocity_max: 8.0
     yaw_rate_max: 1.0
   expert:
-    controller: cooperative_rendezvous_v2
-    offset_ned:
-    - -0.46
-    - 0.0
-    - 0.14
-    position_gain: 1.0
-    relative_velocity_gain: 0.6
-    target_acceleration_feedforward_seconds: 0.4
-    maximum_relative_speed: 2.0
+    controller: full_speed_pursuit_v1
+    # Full-speed pursuit of the velocity- and acceleration-led target
+    # position: no docking offset and no relative-speed cap, so the labels
+    # teach charging through the target at the airframe's velocity_max.
+    lead_seconds: 0.3
     yaw_gain: 2.0
     action_smoothing: 0.05
   task:

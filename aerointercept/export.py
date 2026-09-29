@@ -67,8 +67,7 @@ def main():
         "gru_hidden": cfg.model.gru_hidden,
         "action_decode": {
             "dv_angle_max": cfg.action.dv_angle_max,
-            "speed_min": cfg.png.speed_min,
-            "speed_cmd": cfg.png.speed_cmd,
+            "speed_max": cfg.dynamics.v_max,
             "yaw_rate_max": cfg.png.yaw_rate_max,
             "elev_clamp": cfg.png.elev_clamp,
         },

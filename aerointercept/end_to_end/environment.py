@@ -163,7 +163,6 @@ class EndToEndInterceptEnv(gym.Env):
         png_command = self.teacher.step(
             detection,
             dynamics.roll, dynamics.pitch, dynamics.yaw,
-            dynamics.vel[0], dynamics.vel[1], dynamics.vel[2],
         )
         teacher_action = encode_velocity_command(
             [png_command.vx, png_command.vy, png_command.vz],
@@ -248,7 +247,7 @@ class EndToEndInterceptEnv(gym.Env):
         reward = (
             rw.w_close
             * (transition.previous_distance - transition.distance)
-            / self.dt / cfg.png.speed_cmd
+            / self.dt / cfg.dynamics.v_max
         )
         reward -= rw.time_penalty
         reward -= rw.w_smooth * float(np.sum(

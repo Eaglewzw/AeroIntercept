@@ -247,6 +247,71 @@ def test_experiment_c_multiscale_actor_and_expert_protocol():
     assert command.east > 0.0
 
 
+def test_expert_charges_at_full_speed_from_any_range():
+    cfg = load_gazebo_config()
+    expert = GazeboExpertController(
+        cfg.gazebo.expert, cfg.gazebo.action, cfg.gazebo.camera,
+    )
+    # Interceptor 1 m east of a stationary target; yaw points at the target so
+    # forward velocity is the chase axis. There is no sprint radius: the
+    # command saturates the protocol at velocity_max everywhere.
+    state = {
+        "interceptor_position": [0.0, 1.0, -6.0],
+        "interceptor_velocity": [0.0, 0.0, 0.0],
+        "target_position": [0.0, 0.0, -6.0],
+        "target_velocity": [0.0, 0.0, 0.0],
+        "interceptor_yaw": -np.pi / 2.0,
+    }
+    for _ in range(10):
+        action = expert.action(state)
+    command = decode_action(
+        action, state["interceptor_yaw"],
+        velocity_max=cfg.gazebo.action.velocity_max,
+        yaw_rate_max=cfg.gazebo.action.yaw_rate_max,
+    )
+    top_speed = float(cfg.gazebo.action.velocity_max)
+    speed = np.hypot(command.north, command.east)
+    assert speed == pytest.approx(top_speed, rel=1e-3)
+    assert command.east < -top_speed * 0.9
+    assert abs(command.north) < 0.5
+
+
+def test_expert_far_field_leads_the_target_at_full_speed():
+    cfg = load_gazebo_config()
+    expert = GazeboExpertController(
+        cfg.gazebo.expert, cfg.gazebo.action, cfg.gazebo.camera,
+    )
+    state = {
+        "interceptor_position": [0.0, 0.0, -6.0],
+        "interceptor_velocity": [0.0, 0.0, 0.0],
+        "target_position": [10.0, 0.0, -6.0],
+        "target_velocity": [0.0, 1.0, 0.0],
+        "interceptor_yaw": np.pi / 2.0,
+    }
+    for _ in range(10):
+        action = expert.action(state)
+    command = decode_action(
+        action, state["interceptor_yaw"],
+        velocity_max=cfg.gazebo.action.velocity_max,
+        yaw_rate_max=cfg.gazebo.action.yaw_rate_max,
+    )
+    # No relative-speed cap: the settled command saturates the protocol.
+    assert np.linalg.norm(command.ned_velocity) == pytest.approx(
+        float(cfg.gazebo.action.velocity_max), rel=1e-3)
+    # The chase aims at the velocity-led prediction, not the current position:
+    # a 1 m/s eastward target over lead_seconds shifts the aim east.
+    assert command.east > 0.1
+    assert command.north > 0.0
+
+
+def test_expert_requires_lead_seconds_configuration():
+    cfg = load_gazebo_config()
+    broken = dict(cfg.gazebo.expert)
+    broken.pop("lead_seconds")
+    with pytest.raises(ValueError, match="lead_seconds"):
+        GazeboExpertController(broken, cfg.gazebo.action, cfg.gazebo.camera)
+
+
 def test_expert_truth_is_copy_only_and_separate_from_actor_observation():
     cfg = load_gazebo_config()
     environment = GazeboInterceptEnv(cfg, "/fake", client_factory=FakeBridgeClient)

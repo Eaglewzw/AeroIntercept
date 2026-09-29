@@ -9,17 +9,28 @@ from aerointercept.gazebo.task_logic import camera_target_yaw_geometry
 
 
 class GazeboExpertController:
-    """Cooperative formation-following expert for behavior cloning.
+    """Privileged analytical expert used only to label Gazebo camera frames.
 
-    The controller consumes simulator truth and therefore must never be used as
-    an Actor input or deployment fallback.  Its output follows the exact same
-    normalized body-velocity/yaw-rate action protocol as the learned Actor.
+    Single-phase full-speed pursuit: every command aims at the velocity- and
+    acceleration-led prediction of the target position and saturates the
+    velocity protocol at ``velocity_max``, so the labels teach charging
+    through the target at the airframe's physical top speed.  The retired
+    cooperative-formation docking law (fixed offset, relative-velocity
+    damping, ``maximum_relative_speed`` cap) had the interceptor slow down to
+    match the leader and is gone entirely.
+
+    The controller consumes simulator truth and therefore must never be used
+    as an Actor input or deployment fallback.  Its output follows the exact
+    same normalized body-velocity/yaw-rate action protocol as the learned
+    Actor.
     """
 
     def __init__(self, expert_cfg, action_cfg, camera_cfg):
         self.cfg = expert_cfg
         self.action_cfg = action_cfg
         self.camera_cfg = camera_cfg
+        if not 0.0 < float(self.cfg.get("lead_seconds", 0.0)):
+            raise ValueError("expert configuration requires a positive lead_seconds")
         self._previous_action = np.zeros(4, dtype=np.float32)
         self._previous_target_velocity = None
         self._previous_timestamp = None
@@ -38,9 +49,7 @@ class GazeboExpertController:
         target_position = np.asarray(
             state["target_position"], dtype=np.float64,
         )
-        target_velocity = np.asarray(
-            state["target_velocity"], dtype=np.float64,
-        )
+        target_velocity = np.asarray(state["target_velocity"], dtype=np.float64)
         yaw = float(state["interceptor_yaw"])
         values = np.concatenate((
             interceptor_position, target_position, target_velocity,
@@ -49,24 +58,39 @@ class GazeboExpertController:
         if not np.isfinite(values).all():
             raise ValueError("Gazebo expert state contains NaN or Inf")
 
-        if self.cfg.get("controller") != "cooperative_rendezvous_v2":
-            raise ValueError("the Gazebo expert requires the cooperative rendezvous configuration")
-        desired = target_position + np.asarray(self.cfg.offset_ned, dtype=np.float64)
-        relative_velocity = np.asarray(state["interceptor_velocity"])-target_velocity
-        correction = float(self.cfg.position_gain)*(desired-interceptor_position)
-        correction -= float(self.cfg.relative_velocity_gain)*relative_velocity
-        norm = np.linalg.norm(correction)
-        correction *= min(1., float(self.cfg.maximum_relative_speed)/max(norm, 1e-9))
-        velocity_ned = target_velocity + correction
+        if self.cfg.get("controller") != "full_speed_pursuit_v1":
+            raise ValueError("the Gazebo expert requires the full-speed pursuit configuration")
+
+        # EMA estimate of the target acceleration, folded into the lead-point
+        # prediction so the chase aims where a maneuvering target will be.
         timestamp = state.get("timestamp_seconds")
         if timestamp is not None and self._previous_timestamp is not None:
-            dt = float(timestamp)-self._previous_timestamp
+            dt = float(timestamp) - self._previous_timestamp
             if .01 <= dt <= 1.:
-                acceleration = np.clip((target_velocity-self._previous_target_velocity)/dt, -2., 2.)
-                self._target_acceleration = .7*self._target_acceleration + .3*acceleration
-                velocity_ned += float(self.cfg.target_acceleration_feedforward_seconds)*self._target_acceleration
+                acceleration = np.clip(
+                    (target_velocity - self._previous_target_velocity) / dt, -2., 2.)
+                self._target_acceleration = (
+                    .7 * self._target_acceleration + .3 * acceleration)
         self._previous_target_velocity = target_velocity.copy()
         self._previous_timestamp = None if timestamp is None else float(timestamp)
+
+        # Full-speed pursuit of the lead point: no docking offset and no
+        # relative-speed cap — only the airframe's velocity_max applies.
+        lead_seconds = float(self.cfg.lead_seconds)
+        lead_point = (
+            target_position
+            + target_velocity * lead_seconds
+            + 0.5 * self._target_acceleration * lead_seconds ** 2
+        )
+        chase = lead_point - interceptor_position
+        chase_norm = float(np.linalg.norm(chase))
+        if chase_norm > 1e-6:
+            velocity_ned = (
+                float(self.action_cfg.velocity_max) * chase / chase_norm
+            )
+        else:
+            velocity_ned = np.zeros(3)
+
         _, _, yaw_error = camera_target_yaw_geometry(
             interceptor_position, target_position, yaw,
             float(self.camera_cfg.mount_yaw_offset_rad),
@@ -93,4 +117,4 @@ class GazeboExpertController:
 
 
 def expert_name() -> str:
-    return "gazebo_cooperative_rendezvous_v2"
+    return "gazebo_full_speed_pursuit_v1"

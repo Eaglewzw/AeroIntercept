@@ -177,12 +177,12 @@ def test_png_init_frame():
     t.reset()
     # 目标在图像中心 → LOS 指北
     det = (W / 2 - 25, H / 2 - 25, 50, 50)
-    cmd = t.step(det, 0, 0, 0, 0, 0, 0)
+    cmd = t.step(det, 0, 0, 0)
     assert cmd.phase == "INIT"
     assert abs(t.d_v_angle_v - t.los_v) < 1e-12
     assert abs(t.d_v_angle_z - t.los_z) < 1e-12
-    # 静止时 speed = max(0+d_gain, speed_min) = speed_min
-    assert abs(cmd.speed - t.speed_min) < 1e-12
+    # 速度不再限幅：指令速度恒为 speed_max（动力学物理上限）
+    assert abs(cmd.speed - t.speed_max) < 1e-12
     # 中心目标 ey=0 → 无垂直补偿，速度指北
     assert cmd.vx > 0 and abs(cmd.vy) < 1e-9 and abs(cmd.vz) < 1e-9
 
@@ -192,13 +192,13 @@ def test_png_update_rule():
     t = make_teacher()
     t.reset()
     det0 = (W / 2 - 25, H / 2 - 25, 50, 50)
-    t.step(det0, 0, 0, 0, 0, 0, 0)
+    t.step(det0, 0, 0, 0)
     v_angle_v0, v_angle_z0 = t.d_v_angle_v, t.d_v_angle_z
     los_v0, los_z0 = t.los_v, t.los_z
 
     # 目标右移 100px → LOS 变化超过 0.02 rad
     det1 = (W / 2 - 25 + 100, H / 2 - 25, 50, 50)
-    t.step(det1, 0, 0, 0, 3, 0, 0)
+    t.step(det1, 0, 0, 0)
     diff_v = wrap_pi(t.los_v - los_v0)
     diff_z = wrap_pi(t.los_z - los_z0)
     assert abs(diff_z) > t.los_diff_thresh
@@ -211,10 +211,10 @@ def test_png_small_change_no_update():
     t = make_teacher()
     t.reset()
     det0 = (W / 2 - 25, H / 2 - 25, 50, 50)
-    t.step(det0, 0, 0, 0, 0, 0, 0)
+    t.step(det0, 0, 0, 0)
     v_angle_z0 = t.d_v_angle_z
     det1 = (W / 2 - 25 + 5, H / 2 - 25, 50, 50)   # 5px ≈ 0.0036 rad
-    t.step(det1, 0, 0, 0, 0, 0, 0)
+    t.step(det1, 0, 0, 0)
     assert abs(t.d_v_angle_z - v_angle_z0) < 1e-12
 
 
@@ -222,16 +222,16 @@ def test_png_yaw_pd_and_clamp():
     """偏航 PD：d_yaw = k1*ex + k2*dex，限幅 ±yaw_rate_max"""
     t = make_teacher()
     t.reset()
-    t.step((W / 2 - 25, H / 2 - 25, 50, 50), 0, 0, 0, 0, 0, 0)
+    t.step((W / 2 - 25, H / 2 - 25, 50, 50), 0, 0, 0)
     ex = 400.0
-    cmd = t.step((W / 2 - 25 + ex, H / 2 - 25, 50, 50), 0, 0, 0, 0, 0, 0)
+    cmd = t.step((W / 2 - 25 + ex, H / 2 - 25, 50, 50), 0, 0, 0)
     expected = t.k1_yaw * ex + t.k2_yaw * (ex - 0.0)
     assert abs(cmd.yaw_rate - expected) < 1e-12
     # 大误差限幅
     t2 = PNGTeacher(k1_yaw=0.01)
     t2.reset()
-    t2.step((W / 2, H / 2, 50, 50), 0, 0, 0, 0, 0, 0)
-    cmd2 = t2.step((W - 100, H / 2, 50, 50), 0, 0, 0, 0, 0, 0)
+    t2.step((W / 2, H / 2, 50, 50), 0, 0, 0)
+    cmd2 = t2.step((W - 100, H / 2, 50, 50), 0, 0, 0)
     assert abs(cmd2.yaw_rate) <= t2.yaw_rate_max + 1e-12
 
 
@@ -240,18 +240,18 @@ def test_png_ey_compensation():
     t = make_teacher()
     t.reset()
     det = (W / 2 - 25, H / 2 - 25 - 300, 50, 50)   # ey = -300
-    cmd = t.step(det, 0, 0, 0, 0, 0, 0)
+    cmd = t.step(det, 0, 0, 0)
     vz_no_comp = math.sin(t.d_v_angle_v) * cmd.speed
     assert cmd.vz < vz_no_comp   # 补偿使 vz 更小（上升）
 
 
-def test_png_speed_ramp():
-    """速度爬升：d_v = clamp(|V|+d_gain, [speed_min, speed_cmd])"""
+def test_png_full_speed():
+    """速度不再限幅：无论当前速度如何，指令速度恒为 speed_max"""
     t = make_teacher()
     t.reset()
     det = (W / 2 - 25, H / 2 - 25, 50, 50)
-    cmd = t.step(det, 0, 0, 0, 4.5, 0, 0)   # |V|=4.5, +1.0 → 5.5 → clamp 5.0
-    assert abs(cmd.speed - t.speed_cmd) < 1e-12
+    cmd = t.step(det, 0, 0, 0)
+    assert abs(cmd.speed - t.speed_max) < 1e-12
 
 
 def test_png_lost_coast_then_search():
@@ -259,16 +259,16 @@ def test_png_lost_coast_then_search():
     t = make_teacher()   # coast_steps=3
     t.reset()
     det = (W / 2 - 25, H / 2 - 25, 50, 50)
-    cmd0 = t.step(det, 0, 0, 0, 0, 0, 0)
-    c1 = t.step(None, 0, 0, 0, 0, 0, 0)
-    c2 = t.step(None, 0, 0, 0, 0, 0, 0)
+    cmd0 = t.step(det, 0, 0, 0)
+    c1 = t.step(None, 0, 0, 0)
+    c2 = t.step(None, 0, 0, 0)
     assert c1.phase == "COAST" and c2.phase == "COAST"
     assert abs(c1.vx - cmd0.vx) < 1e-12   # 续飞保持缓存速度
-    c3 = t.step(None, 0, 0, 0, 0, 0, 0)
+    c3 = t.step(None, 0, 0, 0)
     assert c3.phase == "LOST"
     assert abs(c3.vx) < 1e-12 and abs(c3.yaw_rate) > 0   # 制动+旋转搜索
     # 目标重现 → 恢复
-    c4 = t.step(det, 0, 0, 0, 0, 0, 0)
+    c4 = t.step(det, 0, 0, 0)
     assert c4.phase == "INTERCEPT"
 
 
@@ -303,9 +303,8 @@ def test_action_roundtrip():
 def test_zero_action_is_pure_pursuit():
     """零动作 = 沿 LOS 方向以中等速度飞行（PNG 归纳偏置）"""
     los_v, los_z = 0.1, 1.2
-    vx, vy, vz, yr = decode_action(np.zeros(4), los_v, los_z,
-                                   speed_min=2.0, speed_cmd=5.0)
+    vx, vy, vz, yr = decode_action(np.zeros(4), los_v, los_z, speed_max=8.0)
     speed = math.sqrt(vx**2 + vy**2 + vz**2)
-    assert abs(speed - 3.5) < 1e-9           # (2+5)/2
+    assert abs(speed - 4.0) < 1e-9           # (0+1)/2 * 8
     assert abs(math.atan2(vz, math.hypot(vx, vy)) - los_v) < 1e-9
     assert abs(yr) < 1e-12

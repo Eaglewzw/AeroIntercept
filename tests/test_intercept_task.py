@@ -33,15 +33,6 @@ def test_partial_vehicle_visibility_is_distinct_from_center_visibility():
     assert not target_visibility([-1, 0, 0], 1.2, .74, .4)[0]
 
 
-def test_nominal_formation_meets_radius_with_center_inside_camera():
-    cfg = load_gazebo_config()
-    relative = -np.asarray(cfg.gazebo.expert.offset_ned)
-    assert np.linalg.norm(relative) < cfg.gazebo.task.hit_radius
-    yaw_north = [np.cos(np.pi/4), 0, 0, np.sin(np.pi/4)]
-    camera = camera_relative_frd(np.zeros(3), relative, yaw_north)
-    assert target_visibility(camera, cfg.gazebo.camera.horizontal_fov, cfg.gazebo.camera.vertical_fov)[0]
-
-
 def test_pose_interpolation_aligns_exposure_and_handles_quaternion_sign():
     a = {"position": [0., 0., 0.], "velocity": [1., 0., 0.],
          "quaternion_enu_wxyz": [1., 0., 0., 0.], "timestamp_ns": 0}
@@ -66,23 +57,26 @@ def test_scenarios_are_repeatable_bounded_and_start_at_ten_metres(mode):
     assert a.metadata() != Scenario.sample(mode, 32).metadata()
 
 
-def test_cooperative_expert_matches_velocity_at_formation_offset():
+def test_expert_charges_from_the_retired_formation_offset_instead_of_matching_velocity():
     cfg = load_gazebo_config()
     expert = GazeboExpertController(cfg.gazebo.expert, cfg.gazebo.action, cfg.gazebo.camera)
     target = np.array([10., 0., -6.])
     state = {"target_position": target,
-             "interceptor_position": target+cfg.gazebo.expert.offset_ned,
+             "interceptor_position": target + [-0.46, 0.0, 0.14],
              "target_velocity": [.2, .1, 0.], "interceptor_velocity": [.2, .1, 0.],
              "interceptor_yaw": 0.}
-    # Let the existing command filter settle.
+    # Let the command filter settle.
     for _ in range(10):
         action = expert.action(state)
     decoded = decode_action(action, 0., velocity_max=cfg.gazebo.action.velocity_max,
                             yaw_rate_max=cfg.gazebo.action.yaw_rate_max)
-    assert np.allclose(decoded.ned_velocity, state["target_velocity"], atol=1e-5)
+    # Matching the leader's velocity is gone: even from the retired formation
+    # offset the command saturates the protocol and charges through the target.
+    assert np.linalg.norm(decoded.ned_velocity) == pytest.approx(
+        float(cfg.gazebo.action.velocity_max), rel=1e-3)
 
 
-def test_cooperative_expert_keeps_position_correction_at_close_range():
+def test_expert_charges_at_close_range_at_full_speed():
     cfg = load_gazebo_config()
     expert = GazeboExpertController(cfg.gazebo.expert, cfg.gazebo.action, cfg.gazebo.camera)
     state = {"target_position": [.6, 0., -6.],
@@ -93,7 +87,8 @@ def test_cooperative_expert_keeps_position_correction_at_close_range():
     action = expert.action(state)
     decoded = decode_action(action, 0., velocity_max=cfg.gazebo.action.velocity_max,
                             yaw_rate_max=cfg.gazebo.action.yaw_rate_max)
-    expected = (1.-cfg.gazebo.expert.action_smoothing)*cfg.gazebo.expert.position_gain*.14
+    top_speed = float(cfg.gazebo.action.velocity_max)
+    expected = (1. - cfg.gazebo.expert.action_smoothing) * top_speed
     assert decoded.north == pytest.approx(expected)
 
 

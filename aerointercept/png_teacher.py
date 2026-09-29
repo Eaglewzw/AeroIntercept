@@ -5,6 +5,12 @@
   2. Gym 评估的 PNG 基线
   3. ROS2 部署节点的 watchdog 回退控制器
 
+与 C++ 原版的刻意差异：handle_intercept 的速度爬升/限幅
+（d_v = clamp(|V|+d_gain, [speed_min, speed_cmd])）已移除 —— 指令速度恒为
+动力学的物理上限 speed_max（= dynamics.v_max），拦截全程不再人为减速，
+仅在 LOST 搜索段制动。其余（LOS 计算、PNG 角度更新、偏航 PD、丢失分级）
+与 png_calculate() / handle_intercept() / handle_track_lost() 逐行对应。
+
 移植对照（vision_png_control.cpp）：
   png_calculate()      line 266-393：LOS 计算 + PNG 角度更新 + 偏航 PD
   handle_intercept()   line 447-509：速度合成 + 垂直补偿 + 丢失分级
@@ -39,9 +45,7 @@ class PNGTeacher:
     image_height: int = 1080
     kv: float = 4.0
     kz: float = 4.0
-    speed_cmd: float = 5.0
-    speed_min: float = 2.0
-    d_gain: float = 1.0
+    speed_max: float = 8.0        # 指令速度 = dynamics.v_max（物理上限，不再人为限幅）
     k1_yaw: float = 0.0005
     k2_yaw: float = 0.0002
     yaw_rate_max: float = 1.0
@@ -70,14 +74,13 @@ class PNGTeacher:
 
     @classmethod
     def from_config(cls, cfg) -> "PNGTeacher":
-        """从 DotDict 配置构造（configs/default.yaml 的 camera + png 节）"""
+        """从 DotDict 配置构造（configs/default.yaml 的 camera + png + dynamics 节）"""
         return cls(
             focal=cfg.camera.focal_length,
             image_width=cfg.camera.image_width,
             image_height=cfg.camera.image_height,
             kv=cfg.png.kv, kz=cfg.png.kz,
-            speed_cmd=cfg.png.speed_cmd, speed_min=cfg.png.speed_min,
-            d_gain=cfg.png.d_gain,
+            speed_max=cfg.dynamics.v_max,
             k1_yaw=cfg.png.k1_yaw, k2_yaw=cfg.png.k2_yaw,
             yaw_rate_max=cfg.png.yaw_rate_max,
             k_ey=cfg.png.k_ey, vz_ey_max=cfg.png.vz_ey_max,
@@ -98,11 +101,11 @@ class PNGTeacher:
         self.lost_frames = 0
         self.coast_cmd = PNGCommand()
 
-    def step(self, det, roll, pitch, yaw, vx, vy, vz) -> PNGCommand:
+    def step(self, det, roll, pitch, yaw) -> PNGCommand:
         """单步制导
 
         det: (x, y, w, h) bbox 左上角+宽高（像素），None 表示本帧丢失
-        roll/pitch/yaw: 自身姿态 (rad)；vx/vy/vz: 自身 NED 速度 (m/s)
+        roll/pitch/yaw: 自身姿态 (rad)
         """
         # ---------- 丢失分级（handle_intercept line 453-469）----------
         if det is None:
@@ -135,7 +138,7 @@ class PNGTeacher:
             self.last_los_v, self.last_los_z = los_v, los_z
             self.last_v_angle_v, self.last_v_angle_z = los_v, los_z
             self.initialized = True
-            cmd = self._intercept_cmd(vx, vy, vz, ey)
+            cmd = self._intercept_cmd(ey)
             cmd.phase = "INIT"
             self.coast_cmd = cmd
             return cmd
@@ -158,18 +161,15 @@ class PNGTeacher:
         self.d_yaw = max(-self.yaw_rate_max, min(self.yaw_rate_max, self.d_yaw))
         self.last_ex = ex
 
-        # ---------- 速度合成（handle_intercept line 471-501）----------
-        cmd = self._intercept_cmd(vx, vy, vz, ey)
+        # ---------- 全速指令（handle_intercept 速度爬升/限幅已移除）----------
+        cmd = self._intercept_cmd(ey)
         self.coast_cmd = cmd
         return cmd
 
-    def _intercept_cmd(self, vx, vy, vz, ey) -> PNGCommand:
-        """速度爬升 + 角度合成 + 垂直视场补偿"""
-        v_norm = math.sqrt(vx * vx + vy * vy + vz * vz)
-        d_v = min(v_norm + self.d_gain, self.speed_cmd)
-        d_v = max(d_v, self.speed_min)
-
-        cvx, cvy, cvz = angles_to_velocity(self.d_v_angle_v, self.d_v_angle_z, d_v)
+    def _intercept_cmd(self, ey) -> PNGCommand:
+        """恒定全速 + 角度合成 + 垂直视场补偿"""
+        cvx, cvy, cvz = angles_to_velocity(self.d_v_angle_v, self.d_v_angle_z,
+                                           self.speed_max)
 
         # ey 垂直视场补偿（line 482-492）
         vz_ey = self.k_ey * ey
@@ -179,5 +179,6 @@ class PNGTeacher:
         return PNGCommand(
             vx=cvx, vy=cvy, vz=cvz, yaw_rate=self.d_yaw,
             phase="INTERCEPT",
-            v_angle_v=self.d_v_angle_v, v_angle_z=self.d_v_angle_z, speed=d_v,
+            v_angle_v=self.d_v_angle_v, v_angle_z=self.d_v_angle_z,
+            speed=self.speed_max,
         )

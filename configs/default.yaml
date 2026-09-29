@@ -23,12 +23,11 @@ camera:
   target_size_jitter: 0.2     # 每集 ±20% 随机
 
 png:
-  # ---- 与 uav_vision_png params.yaml 一致 ----
+  # ---- 除速度外与 uav_vision_png params.yaml 一致 ----
+  # 速度不再人为限幅：老师/策略速度域 = [0, dynamics.v_max]，
+  # 拦截全程全速冲击，仅受机体物理约束（dynamics.v_max / a_max）。
   kv: 4.0
   kz: 4.0
-  speed_cmd: 5.0              # 期望冲击速度上限 (m/s)
-  speed_min: 2.0              # handle_intercept 下限
-  d_gain: 1.0
   k1_yaw: 0.0005              # 偏航 P 增益 (rad/s per px)
   k2_yaw: 0.0002              # 偏航 D 增益
   yaw_rate_max: 1.0           # 偏航角速率限幅 (rad/s)
@@ -89,7 +88,7 @@ env:
   ground_z: -0.5              # 触地判定
   # ---- 奖励权重 ----
   reward:
-    w_close: 1.0              # 接近速率（归一化到 speed_cmd）
+    w_close: 1.0              # 接近速率（归一化到 dynamics.v_max）
     hit_bonus: 50.0
     w_fov: 0.1                # FOV 偏离二次惩罚
     invalid_penalty: 0.2      # 丢失帧惩罚（每步）
@@ -103,7 +102,7 @@ action:
   # 带 PNG 归纳偏置的动作解码（零动作 ≈ 纯追踪）
   # 1.2 rad：实测 0.8 会截断 PNG 对圆周目标的累积前置角（a1 饱和率 17%）
   dv_angle_max: 1.2           # a0/a1 → 相对 LOS 的速度方向偏移上限 (rad)
-  # speed = speed_min + (speed_cmd-speed_min)*(a3+1)/2
+  # speed = (a3+1)/2 * dynamics.v_max
   # yaw_rate = a4 * png.yaw_rate_max
 
 model:

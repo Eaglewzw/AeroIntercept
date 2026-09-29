@@ -23,7 +23,8 @@ valid=0、age 递增 —— 策略由此学习惯性续飞行为。
 动作（4 维，tanh 输出 ∈ [-1,1]，带 PNG 归纳偏置：零动作 ≈ 纯追踪）：
   a0 → v_angle_v = clamp(los_v + a0*dv_angle_max, ±elev_clamp)
   a1 → v_angle_z = los_z + a1*dv_angle_max          （相对 LOS 的前置偏移）
-  a2 → speed     = speed_min + (speed_cmd-speed_min)*(a2+1)/2
+  a2 → speed     = (a2+1)/2 * speed_max             （speed_max = dynamics.v_max，
+                                                     速度域 [0, v_max]，无人为限幅）
   a3 → yaw_rate  = a3 * yaw_rate_max
 速度合成与 handle_intercept() line 478-480 完全一致（angles_to_velocity）。
 """
@@ -115,7 +116,7 @@ class FeatureBuilder:
 # ============================================================
 
 def decode_action(a, los_v, los_z, *, dv_angle_max=0.8,
-                  speed_min=2.0, speed_cmd=5.0, yaw_rate_max=1.0,
+                  speed_max=8.0, yaw_rate_max=1.0,
                   elev_clamp=math.pi / 4.0):
     """动作 [-1,1]^4 → (vx, vy, vz, yaw_rate) NED 速度指令
 
@@ -124,25 +125,25 @@ def decode_action(a, los_v, los_z, *, dv_angle_max=0.8,
     a = np.clip(np.asarray(a, dtype=np.float64), -1.0, 1.0)
     v_angle_v = max(-elev_clamp, min(elev_clamp, los_v + a[0] * dv_angle_max))
     v_angle_z = los_z + a[1] * dv_angle_max
-    speed = speed_min + (speed_cmd - speed_min) * (a[2] + 1.0) / 2.0
+    speed = (a[2] + 1.0) * 0.5 * speed_max
     yaw_rate = a[3] * yaw_rate_max
     vx, vy, vz = angles_to_velocity(v_angle_v, v_angle_z, speed)
     return vx, vy, vz, yaw_rate
 
 
 def encode_action(v_angle_v, v_angle_z, speed, yaw_rate, los_v, los_z, *,
-                  dv_angle_max=0.8, speed_min=2.0, speed_cmd=5.0,
+                  dv_angle_max=0.8, speed_max=8.0,
                   yaw_rate_max=1.0):
     """期望速度角 → 动作标签（decode_action 的逆）"""
     a0 = np.clip((v_angle_v - los_v) / dv_angle_max, -1.0, 1.0)
     a1 = np.clip(wrap_pi(v_angle_z - los_z) / dv_angle_max, -1.0, 1.0)
-    a2 = np.clip(2.0 * (speed - speed_min) / (speed_cmd - speed_min) - 1.0, -1.0, 1.0)
+    a2 = np.clip(2.0 * speed / speed_max - 1.0, -1.0, 1.0)
     a3 = np.clip(yaw_rate / yaw_rate_max, -1.0, 1.0)
     return np.array([a0, a1, a2, a3], dtype=np.float32)
 
 
 def encode_action_from_velocity(vx, vy, vz, yaw_rate, los_v, los_z, *,
-                                dv_angle_max=0.8, speed_min=2.0, speed_cmd=5.0,
+                                dv_angle_max=0.8, speed_max=8.0,
                                 yaw_rate_max=1.0):
     """最终 NED 速度指令 → 动作标签（BC 监督用）
 
@@ -156,5 +157,5 @@ def encode_action_from_velocity(vx, vy, vz, yaw_rate, los_v, los_z, *,
     v_angle_v = math.atan2(vz, math.hypot(vx, vy))
     v_angle_z = math.atan2(vx, vy)
     return encode_action(v_angle_v, v_angle_z, speed, yaw_rate, los_v, los_z,
-                         dv_angle_max=dv_angle_max, speed_min=speed_min,
-                         speed_cmd=speed_cmd, yaw_rate_max=yaw_rate_max)
+                         dv_angle_max=dv_angle_max, speed_max=speed_max,
+                         yaw_rate_max=yaw_rate_max)
