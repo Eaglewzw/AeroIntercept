@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 *.egg-info/
+build/
 # Reusable datasets and per-experiment outputs stay local.
 /artifacts/*
 !/artifacts/.gitkeep

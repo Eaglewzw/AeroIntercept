@@ -18,7 +18,7 @@ python -m aerointercept.gazebo.scripts.view_camera --display
 python -m aerointercept.gazebo.scripts.evaluate \
   --launch --headless --device cuda:0 --suite --episodes 2 --seed 10000 \
   --config configs/gazebo_feedback.yaml \
-  --checkpoint artifacts/runs/training/corrective_100_20260925/best.pt \
+  --checkpoint assets/models/best.pt \
   --output artifacts/runs/experiments/visual_recheck/evaluation.json --trace
 ```
 

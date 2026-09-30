@@ -28,7 +28,7 @@ AeroIntercept 面向移动无人机目标的视觉跟踪与接触式拦截研究
 ## 效果展示
 
 <div align="center">
-  <img src="assets/vedio.gif" alt="AeroIntercept 仿真演示" width="900">
+  <img src="assets/video.gif" alt="AeroIntercept 仿真演示" width="900">
 </div>
 
 
@@ -37,17 +37,27 @@ AeroIntercept 面向移动无人机目标的视觉跟踪与接触式拦截研究
 
 ![AeroIntercept 模型架构：双帧视觉编码、自身状态融合、动作输出与独立 Critic](assets/docs/figures/current_model_architecture.png)
 
-Actor 使用两帧 **640 × 640 RGB** 图像和 **6 维自身状态**（三轴速度、三轴角速度）。
-视觉特征经过双帧 Transformer，与自身状态特征融合后生成控制动作；图像注意力提供偏航反馈，
-辅助预测头用于训练监督。独立 Critic 仅在 PPO 训练中使用，目标真值不进入 Actor。
+Actor 输入两帧 **640 × 640 RGB** 图像与 **6 维自身状态**（三轴速度、三轴角速度），
+经 ResNet-18 多尺度编码与双帧 Transformer 融合后输出控制动作；图像注意力提供偏航反馈，
+辅助预测头仅用于训练监督。独立 Critic 仅在 PPO 训练中使用，目标真值不进入 Actor。
 
 ## 仿真环境
 
-基于 **Gazebo Harmonic + PX4 SITL + ROS 2 Humble**，使用双 x500 无人机、机载相机和公园场景。
-PX4 负责底层飞行控制，策略通过 Offboard 接口发送速度指令。
+基于 **Gazebo Harmonic + PX4 SITL + ROS 2 Humble**：公园场景中的双 x500 无人机，
+目标机按受限合作运动飞行，拦截机通过 PX4 Offboard 接口执行策略速度指令。
+任务从约 **10 m** 两机中心距开始，两机接触或一步内最小中心距 **≤0.5 m** 即为成功。
 
-默认任务从约 **10 m** 两机中心距开始，以 **0.5 m** 为命中半径：两机接触，或一步内最小中心距进入该半径即为成功。
-目标采用受限合作运动，用于研究视觉策略的跟踪、接近和泛化能力。项目仍处于研究验证阶段。
+## 闭环结果
+
+保留权重（全速追击 BC 模型）在五种目标运动、各 4 回合的开发评估中（`contact_intercept_v1`，seed 10000）：
+
+| 目标运动 | 圆周 | 正弦 | 随机游走 | 八字（留出） | 启停（留出） | 整体 |
+|---|---|---|---|---|---|---|
+| 命中率 | 3/4 | 2/4 | 3/4 | 0/4 | 1/4 | **9/20（45%）** |
+
+成功回合平均 **2.4–3.0 s** 仿真时间即完成接触；失败集中在出画、植被接触与目标丢失。
+训练场景 50–75%，留出场景 0–25%，多场景泛化仍是当前短板。项目仍处于研究验证阶段，
+正式验收标准与逐回合数据见[结果与验收](assets/docs/RESULTS.md)。
 
 ## 快速体验
 
@@ -55,22 +65,21 @@ PX4 负责底层飞行控制，策略通过 Offboard 接口发送速度指令。
 [主配置](configs/gazebo_feedback.yaml) 中的本机路径。数据集与训练产物不随 Git 分发，
 仓库内的 `assets/models/best.pt` 是随仓库提供的保留权重。
 
-在工程根目录激活环境后，使用已有权重启动可视化演示：
+在工程根目录激活环境后，启动可视化演示：
 
 ```bash
 conda activate AeroIntercept
 
-  python -m aerointercept.gazebo.scripts.evaluate \
-    --launch --device cuda:0 \
-    --config configs/gazebo_feedback.yaml \
-    --checkpoint assets/models/best.pt \
-    --initial-distance 30 --max-speed 5 \
-    --mode stop_go --episodes 4 --seed 10016 \
-    --output "artifacts/runs/experiments/demo_30m_$(date +%Y%m%d_%H%M%S)/evaluation.json"
-
+python -m aerointercept.gazebo.scripts.evaluate \
+  --launch --device cuda:0 \
+  --config configs/gazebo_feedback.yaml \
+  --checkpoint assets/models/best.pt \
+  --mode circle --episodes 4 --seed 10016 \
+  --output "artifacts/runs/experiments/demo_$(date +%Y%m%d_%H%M%S)/evaluation.json"
 ```
 
-`--mode` 可切换目标运动类型；添加 `--headless` 可关闭图形界面，按 `Ctrl+C` 停止运行。
+`--mode` 可选 `circle / sinusoidal / random_walk / figure_eight / stop_go`；
+添加 `--headless` 可关闭图形界面，`Ctrl+C` 随时停止运行。
 
 ## 工程结构
 
@@ -79,9 +88,7 @@ conda activate AeroIntercept
 | `aerointercept/` | 策略模型、训练算法、仿真接口与评估工具 |
 | `configs/` | 模型、训练与仿真配置 |
 | `assets/` | 场景资源、架构图和项目文档 |
-| `artifacts/data/` | 本地训练数据集 |
-| `artifacts/runs/training/` | 权重、训练日志与离线指标 |
-| `artifacts/runs/experiments/` | 闭环评估报告与轨迹 |
 | `tests/` | 回归测试 |
 
+本地 `artifacts/` 存放数据集、训练权重与评估报告（不随 Git 分发）。
 训练结果、闭环评估与正式验收标准见[结果与验收](assets/docs/RESULTS.md)。
