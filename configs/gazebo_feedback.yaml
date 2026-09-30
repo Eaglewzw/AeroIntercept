@@ -100,10 +100,20 @@ end_to_end:
     storage_dtype: uint8
     normalization: float32/255 then ImageNet mean/std
   model:
+    history_frames: 2
     encoder_type: resnet18_multiscale_v1
     pretrained_weights: IMAGENET1K_V1
+    encoder_channels: [24, 40, 64, 96]
+    encoder_strides: [1, 2, 2, 1]
     encoder_multiscale_channels: 96
     encoder_chunk_size: 4
+    embedding_dim: 128
+    transformer_heads: 4
+    transformer_layers: 2
+    transformer_ff_dim: 256
+    dropout: 0.1
+    critic_dim: 15
+    critic_hidden: 256
     init_log_std: -3.5
     self_state_dim: 6
     self_velocity_scale: 8.0
@@ -120,6 +130,7 @@ end_to_end:
     backbone_learning_rate: 1.0e-05
     backbone_freeze_epochs: 3
     keep_backbone_batch_norm_eval: true
+    keep_all_batch_norm_eval: false
     val_fraction: 0.1
     num_workers: 0
     cache_episodes: 48
@@ -135,3 +146,5 @@ end_to_end:
   auxiliary:
     spatial_coef: 0.05
     action_axis_weights: [1.0, 1.0, 16.0, 4.0]
+    near_action_weight: 1.0
+    near_action_radius_m: 2.0

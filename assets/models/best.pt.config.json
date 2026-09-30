@@ -1,0 +1,135 @@
+{
+ "checkpoint_sha256": "b543b74f3404e894",
+ "phase": 3,
+ "checkpoint_schema": 6,
+ "backend": "gazebo_harmonic_px4_sitl",
+ "training_stage": "behavior_cloning",
+ "experiment": "C",
+ "model_config": {
+  "history_frames": 2,
+  "encoder_channels": [
+   24,
+   40,
+   64,
+   96
+  ],
+  "encoder_strides": [
+   1,
+   2,
+   2,
+   1
+  ],
+  "encoder_chunk_size": 4,
+  "embedding_dim": 128,
+  "transformer_heads": 4,
+  "transformer_layers": 2,
+  "transformer_ff_dim": 256,
+  "dropout": 0.1,
+  "critic_dim": 15,
+  "critic_hidden": 256,
+  "init_log_std": -3.5,
+  "encoder_type": "resnet18_multiscale_v1",
+  "pretrained_weights": "IMAGENET1K_V1",
+  "encoder_multiscale_channels": 96,
+  "self_state_dim": 6,
+  "self_velocity_scale": 8.0,
+  "self_angular_velocity_scale": 2.0,
+  "spatial_coordinates": true,
+  "visual_yaw_gain": 2.0,
+  "camera_horizontal_fov": 1.204
+ },
+ "render_config": {
+  "image_width": 640,
+  "image_height": 640,
+  "sprite_path": "assets/data.png",
+  "sprite_probability": 0.85,
+  "min_target_pixels": 2.0,
+  "focal_jitter": 0.08,
+  "target_scale_jitter": 0.25,
+  "brightness_range": [
+   0.65,
+   1.35
+  ],
+  "contrast_range": [
+   0.65,
+   1.35
+  ],
+  "noise_std_range": [
+   0.0,
+   8.0
+  ],
+  "blur_kernels": [
+   0,
+   0,
+   0,
+   3,
+   5
+  ],
+  "source": "Gazebo OakD-Lite IMX214 / full-frame letterbox",
+  "source_image_width": 1920,
+  "source_image_height": 1080,
+  "transform": "full_frame_letterbox_v1",
+  "channel_order": "RGB",
+  "history_frames": 2,
+  "storage_dtype": "uint8",
+  "normalization": "float32/255 then ImageNet mean/std"
+ },
+ "action_config": {
+  "protocol": "body_forward_right_down_yaw_rate",
+  "velocity_max": 8.0,
+  "yaw_rate_max": 1.0
+ },
+ "label_config": {
+  "future_horizon_s": 1.0,
+  "risk_horizon_s": 2.0,
+  "risk_radius": 1.6,
+  "position_norm": 30.0,
+  "velocity_norm": 10.0,
+  "target_velocity_norm": 5.0,
+  "altitude_norm": 20.0
+ },
+ "auxiliary_config": {
+  "future_coef": 1.0,
+  "risk_coef": 0.5,
+  "confidence_coef": 0.5,
+  "spatial_coef": 0.05,
+  "action_axis_weights": [
+   1.0,
+   1.0,
+   16.0,
+   4.0
+  ],
+  "action_coef": 20.0,
+  "visible_action_only": true
+ },
+ "task_config": {
+  "reset_position_ned": [
+   0.0,
+   0.0,
+   -6.0
+  ],
+  "reset_yaw": 0.0,
+  "look_at_target": true,
+  "reset_yaw_tolerance_rad": 0.15,
+  "reset_timeout_s": 90.0,
+  "reset_tolerance_m": 0.5,
+  "reset_speed_tolerance": 0.5,
+  "reset_target_distance_m": 10.0,
+  "reset_target_distance_tolerance_m": 0.2,
+  "target_minimum_altitude": 4.0,
+  "episode_max_steps": 600,
+  "hit_radius": 0.5,
+  "task_version": "contact_intercept_v1",
+  "center_reference": "gazebo_base_link_center_enu_to_ned_v2",
+  "target_bounding_radius_m": 0.4,
+  "require_contact_monitor": true,
+  "lost_steps": 30,
+  "ground_height": 0.25,
+  "scene_boundary": 35.0,
+  "maximum_altitude": 20.0
+ },
+ "safety_config": {
+  "confidence_threshold": 0.35,
+  "max_command_speed": 8.0
+ }
+}

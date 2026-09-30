@@ -44,6 +44,20 @@ README 的"闭环结果"只是摘要，本文的每条结论均可在 `artifacts
 经验：**离线验证损失与闭环表现可以完全背离**——纯专家数据上适配主干导致闭环崩溃，
 模型在环纠偏数据上适配则正向迁移；候选权重必须闭环复测。
 
+### 当前权重复现
+
+两阶段都在本地 4 GB GPU 上执行，训练参数见[使用指南](GUIDE.md)第 4 节
+（`--batch-size 1 --sequence-length 8`，`--selection-metric action --split mode_visibility --visible-action-only`）：
+
+1. 五场景微调：`--init-checkpoint` 指向全速追击模型；
+   数据 = 五场景专家 173 回合（circle/sinusoidal/random_walk 各 30，seeds 31001–31003；
+   figure_eight 40，seed 31004；stop_go 40，seed 31005；试采 3 回合，seed 31234）。
+2. 纠偏微调：`--init-checkpoint` 指向阶段一 best；
+   数据 = 模型在环纠偏 135 回合（30/30/25/25/25，seeds 32001–32005，`--expert-weight 0.5`）。
+
+权重旁的 `best.pt.config.json` 是该权重内嵌完整配置的导出，
+`best.pt.metrics.json` / `best.history.jsonl` 是训练器自带的划分清单与逐轮记录。
+
 ## 正式验收标准
 
 - 初始中心距 10±0.2 m；成功 = 两机接触或一步内最小中心距 ≤0.5 m；撞他物/触地/无效/出画均失败。
