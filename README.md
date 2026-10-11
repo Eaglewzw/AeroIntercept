@@ -1,6 +1,8 @@
 # AeroIntercept
 
-### 面向自主无人机的端到端拦截与仿真验证平台
+**English** | [简体中文](README.zh-CN.md)
+
+### End-to-End Interception and Simulation Validation for Autonomous UAVs
 
 <div align="center">
 
@@ -9,63 +11,69 @@
 [![ROS 2](https://img.shields.io/badge/ROS_2-Humble-22314E.svg)](https://docs.ros.org/en/humble/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-BC%20%2F%20PPO-EE4C2C.svg)](https://pytorch.org/)
 
-
 </div>
 
-AeroIntercept 面向移动无人机目标的视觉跟踪与接触式拦截研究，将机载视觉策略、
-学习算法和 Gazebo/PX4 物理仿真整合为一个可训练、可评估的工程。
-策略直接接收连续 RGB 图像与飞控自身状态，输出三维速度和偏航角速度指令。
+AeroIntercept is a research platform for visual tracking and contact interception of moving UAV targets.
+It integrates onboard vision policies, learning algorithms, and Gazebo/PX4 physics simulation
+into a trainable and evaluable system. The policy takes consecutive RGB images and the UAV's
+own flight state as input, and outputs 3D velocity and yaw-rate commands.
 
+## Key Features
 
+- **Vision and flight-state fusion**: Two RGB frames provide visual information, while linear and angular velocities describe the UAV's own motion.
+- **End-to-end control**: ResNet-18 multiscale encoding, spatial attention, and a Transformer jointly produce actions without a separate target detector.
+- **Learning and simulation loop**: Includes entry points for expert data collection, behavior cloning (BC), asymmetric Actor-Critic PPO, and model export.
+- **Multiple evaluation scenarios**: Supports circular, sinusoidal, smooth random-walk, figure-eight, and stop-and-go target motion, with separate training and held-out scenarios.
 
-## 核心特点
-
-- **图像与自身状态融合**：双帧 RGB 提供视觉信息，飞控速度与角速度补充自身运动状态。
-- **端到端控制**：ResNet-18 多尺度编码、空间注意力与 Transformer 共同生成动作，无需独立目标检测器。
-- **学习与仿真闭环**：提供专家数据采集、行为克隆（BC）、非对称 Actor-Critic PPO 和模型导出入口。
-- **多场景验证**：支持圆周、正弦、平滑随机游走、八字及启停运动，区分训练场景与留出场景。
-
-## 效果展示
+## Demo
 
 <div align="center">
-  <img src="assets/video.gif" alt="AeroIntercept 仿真演示" width="900">
+  <img src="assets/video.gif" alt="AeroIntercept simulation demo" width="900">
 </div>
 
+## Model Architecture
 
+![AeroIntercept model architecture: two-frame visual encoding, flight-state fusion, action output, and a separate Critic](assets/docs/figures/current_model_architecture.png)
 
-## 模型架构
+The Actor takes two **640 × 640 RGB** frames and a **6-dimensional flight state**
+(three-axis linear velocity and three-axis angular velocity). ResNet-18 multiscale encoding
+and a two-frame Transformer fuse these inputs to produce control actions. Image attention
+provides yaw feedback, and auxiliary prediction heads are used only for training supervision.
+A separate Critic is used only during PPO training; target ground truth is never fed to the Actor.
 
-![AeroIntercept 模型架构：双帧视觉编码、自身状态融合、动作输出与独立 Critic](assets/docs/figures/current_model_architecture.png)
+## Simulation Environment
 
-Actor 输入两帧 **640 × 640 RGB** 图像与 **6 维自身状态**（三轴速度、三轴角速度），
-经 ResNet-18 多尺度编码与双帧 Transformer 融合后输出控制动作；图像注意力提供偏航反馈，
-辅助预测头仅用于训练监督。独立 Critic 仅在 PPO 训练中使用，目标真值不进入 Actor。
+Built on **Gazebo Harmonic + PX4 SITL + ROS 2 Humble**, the environment features two x500 UAVs
+in a park scene. The target follows constrained cooperative motion, while the interceptor
+executes policy velocity commands through the PX4 Offboard interface.
+Each episode starts with approximately **10 m** between the UAV centers. Success is defined
+as physical contact or a minimum center-to-center distance of **≤0.5 m** within a simulation step.
 
-## 仿真环境
+## Closed-Loop Results
 
-基于 **Gazebo Harmonic + PX4 SITL + ROS 2 Humble**：公园场景中的双 x500 无人机，
-目标机按受限合作运动飞行，拦截机通过 PX4 Offboard 接口执行策略速度指令。
-任务从约 **10 m** 两机中心距开始，两机接触或一步内最小中心距 **≤0.5 m** 即为成功。
+The retained checkpoint (a BC model trained with corrective data from five scenarios) was evaluated
+on five target motion patterns, with four episodes per pattern in a development evaluation
+(`contact_intercept_v1`, seed 10000):
 
-## 闭环结果
-
-保留权重（五场景纠偏 BC 模型）在五种目标运动、各 4 回合的开发评估中（`contact_intercept_v1`，seed 10000）：
-
-| 目标运动 | 圆周 | 正弦 | 随机游走 | 八字 | 启停 | 整体 |
+| Target Motion | Circular | Sinusoidal | Random Walk | Figure Eight | Stop and Go | Overall |
 |---|---|---|---|---|---|---|
-| 命中率 | 3/4 | 4/4 | 2/4 | 0/4 | 3/4 | **12/20（60%）** |
+| Hit Rate | 3/4 | 4/4 | 2/4 | 0/4 | 3/4 | **12/20 (60%)** |
 
-成功回合平均 **2.4–3.0 s** 仿真时间即完成接触；失败集中在植被接触、出画与目标丢失，
-八字场景仍是当前短板，独立种子复测为 10/20。项目仍处于研究验证阶段，
-正式验收标准与逐回合数据见[结果与验收](assets/docs/RESULTS.md)。
+Successful episodes reached contact in an average of **2.4–3.0 s** of simulation time.
+Failures were mainly associated with vegetation contact, targets leaving the camera view,
+and target loss. The figure-eight scenario remains a weakness; a repeat evaluation with an
+independent seed achieved 10/20. The project is still in the research validation stage.
+See [Results and Acceptance Criteria](assets/docs/RESULTS.md) for formal acceptance criteria
+and per-episode data.
 
-## 快速体验
+## Quick Start
 
-先按 [使用指南](assets/docs/GUIDE.md) 配置仿真依赖与 Python 环境，并核对
-[主配置](configs/gazebo_feedback.yaml) 中的本机路径。数据集与训练产物不随 Git 分发，
-仓库内的 `assets/models/best.pt` 是随仓库提供的保留权重。
+Follow the [Usage Guide](assets/docs/GUIDE.md) to set up simulation dependencies and the Python
+environment, then verify the machine-specific paths in the
+[main configuration](configs/gazebo_feedback.yaml). Datasets and training artifacts are not
+distributed through Git. The retained checkpoint, `assets/models/best.pt`, is included in the repository.
 
-在工程根目录激活环境后，启动可视化演示：
+From the project root, activate the environment and launch the visual demo:
 
 ```bash
 conda activate AeroIntercept
@@ -78,17 +86,18 @@ python -m aerointercept.gazebo.scripts.evaluate \
   --output "artifacts/runs/experiments/demo_$(date +%Y%m%d_%H%M%S)/evaluation.json"
 ```
 
-`--mode` 可选 `circle / sinusoidal / random_walk / figure_eight / stop_go`；
-添加 `--headless` 可关闭图形界面，`Ctrl+C` 随时停止运行。
+Supported `--mode` values are `circle / sinusoidal / random_walk / figure_eight / stop_go`.
+Add `--headless` to disable the graphical interface, or press `Ctrl+C` to stop the run.
 
-## 工程结构
+## Project Structure
 
-| 目录 | 内容 |
+| Directory | Contents |
 |---|---|
-| `aerointercept/` | 策略模型、训练算法、仿真接口与评估工具 |
-| `configs/` | 模型、训练与仿真配置 |
-| `assets/` | 场景资源、架构图和项目文档 |
-| `tests/` | 回归测试 |
+| `aerointercept/` | Policy models, training algorithms, simulation interfaces, and evaluation tools |
+| `configs/` | Model, training, and simulation configurations |
+| `assets/` | Scene assets, architecture figures, and project documentation |
+| `tests/` | Regression tests |
 
-本地 `artifacts/` 存放数据集、训练权重与评估报告（不随 Git 分发）。
-训练结果、闭环评估与正式验收标准见[结果与验收](assets/docs/RESULTS.md)。
+The local `artifacts/` directory stores datasets, trained checkpoints, and evaluation reports
+(not distributed through Git). See [Results and Acceptance Criteria](assets/docs/RESULTS.md)
+for training results, closed-loop evaluations, and formal acceptance criteria.
